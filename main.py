@@ -18,9 +18,20 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DOMAIN = os.environ.get("DOMAIN", "mg.abdr.tax").strip().lower()
+
+# رابط تطبيقك على Railway مثال:
+# https://web-production-5256.up.railway.app
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
+
 TG_WEBHOOK_PATH = os.environ.get("TG_WEBHOOK_PATH", "/telegram").strip()
+if not TG_WEBHOOK_PATH.startswith("/"):
+    TG_WEBHOOK_PATH = "/" + TG_WEBHOOK_PATH
+
 TG_SECRET_TOKEN = os.environ.get("TG_SECRET_TOKEN", "").strip()
 MAILGUN_WEBHOOK_SECRET = os.environ.get("MAILGUN_WEBHOOK_SECRET", "").strip()
+
+OWNER_ID_RAW = os.environ.get("OWNER_ID", "").strip()
+OWNER_ID: Optional[int] = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else None
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
@@ -31,6 +42,7 @@ user_last_email: Dict[int, str] = {}
 waiting_for_name: Set[int] = set()
 email_owner: Dict[str, int] = {}
 
+
 def sanitize_local_part(raw: str) -> str:
     s = raw.strip().lower()
     s = re.sub(r"\s+", ".", s)
@@ -38,12 +50,15 @@ def sanitize_local_part(raw: str) -> str:
     s = re.sub(r"\.+", ".", s).strip(".")
     return s[:32]
 
+
 def random_local_part(length: int = 10) -> str:
     alphabet = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
+
 def make_email(local_part: str) -> str:
     return f"{local_part}@{DOMAIN}"
+
 
 def remember_email(user_id: int, email: str) -> None:
     lst = user_emails.setdefault(user_id, [])
@@ -51,6 +66,7 @@ def remember_email(user_id: int, email: str) -> None:
         lst.append(email)
     user_last_email[user_id] = email
     email_owner[email] = user_id
+
 
 def start_text(last_email: Optional[str]) -> str:
     base = (
@@ -61,6 +77,7 @@ def start_text(last_email: Optional[str]) -> str:
         return f"{base}\n\nبريدك الحالي:\n`{last_email}`"
     return base
 
+
 def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ اختر اسم", callback_data="choose_name")],
@@ -69,11 +86,13 @@ def main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📁 بريدي الخاص", callback_data="my_emails")],
     ])
 
+
 def format_my_emails(emails: List[str]) -> str:
     lines = ["📁 بريداتي:"]
     for e in emails:
         lines.append(f"• `{e}`")
     return "\n".join(lines)
+
 
 def format_inbound_message(to_email: str, sender: str, subject: str, body: str) -> str:
     body = (body or "").strip()
@@ -87,6 +106,7 @@ def format_inbound_message(to_email: str, sender: str, subject: str, body: str) 
         f"{body if body else '(بدون نص)'}"
     )
 
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     last = user_last_email.get(uid)
@@ -96,6 +116,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
     )
+
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -126,7 +147,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 عودة", callback_data="back")]]),
             )
             return
-        # يرسل آخر بريد تم إنشاؤه فقط
         await q.message.reply_text(f"`{last}`", parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -155,6 +175,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in waiting_for_name:
@@ -173,31 +194,75 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 عودة", callback_data="back")]]),
     )
 
+
 app = FastAPI()
 tg_app: Optional[Application] = None
+
 
 @app.on_event("startup")
 async def startup():
     global tg_app
+
     tg_app = Application.builder().token(BOT_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CallbackQueryHandler(on_button))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
     await tg_app.initialize()
     await tg_app.start()
+
+    # ✅ المهم: تعيين Webhook تلقائياً
+    if PUBLIC_URL:
+        webhook_url = f"{PUBLIC_URL}{TG_WEBHOOK_PATH}"
+        await tg_app.bot.set_webhook(
+            url=webhook_url,
+            secret_token=TG_SECRET_TOKEN if TG_SECRET_TOKEN else None,
+            drop_pending_updates=True,
+        )
+
+    # ✅ (اختياري) رسالة تأكيد للمالك
+    if OWNER_ID:
+        try:
+            msg = "✅ Bot started"
+            if PUBLIC_URL:
+                msg += f"\nWebhook: `{PUBLIC_URL}{TG_WEBHOOK_PATH}`"
+            await tg_app.bot.send_message(
+                chat_id=OWNER_ID,
+                text=msg,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
 
 @app.on_event("shutdown")
 async def shutdown():
     if tg_app:
+        try:
+            # تنظيف webhook (اختياري)
+            await tg_app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            pass
         await tg_app.stop()
         await tg_app.shutdown()
+
+
+@app.get("/")
+async def root():
+    return {"ok": True}
+
 
 @app.get("/health")
 async def health():
     return {"ok": True}
 
+
 @app.post(TG_WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
+    if not tg_app:
+        raise HTTPException(status_code=500, detail="Bot not ready")
+
     if TG_SECRET_TOKEN:
         hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if hdr != TG_SECRET_TOKEN:
@@ -208,8 +273,12 @@ async def telegram_webhook(request: Request):
     await tg_app.update_queue.put(update)
     return {"ok": True}
 
+
 @app.post("/mailgun")
 async def mailgun_inbound(request: Request):
+    if not tg_app:
+        return {"ok": True}
+
     if MAILGUN_WEBHOOK_SECRET:
         if request.headers.get("X-Webhook-Secret", "") != MAILGUN_WEBHOOK_SECRET:
             raise HTTPException(status_code=403, detail="Bad mailgun secret")
