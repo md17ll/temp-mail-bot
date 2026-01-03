@@ -3,9 +3,7 @@ import re
 import secrets
 import string
 from typing import Dict, List, Optional, Set
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
-import asyncpg
 from fastapi import FastAPI, Request, HTTPException
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -35,17 +33,14 @@ MAILGUN_WEBHOOK_SECRET = os.environ.get("MAILGUN_WEBHOOK_SECRET", "").strip()
 OWNER_ID_RAW = os.environ.get("OWNER_ID", "").strip()
 OWNER_ID: Optional[int] = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else None
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
 
-# RAM فقط للأشياء المؤقتة (مثل انتظار الاسم)
+# بدون تخزين دائم (RAM فقط)
+user_emails: Dict[int, List[str]] = {}
+user_last_email: Dict[int, str] = {}
 waiting_for_name: Set[int] = set()
-
-app = FastAPI()
-tg_app: Optional[Application] = None
-db_pool: Optional[asyncpg.Pool] = None
+email_owner: Dict[str, int] = {}
 
 
 def sanitize_local_part(raw: str) -> str:
@@ -63,6 +58,14 @@ def random_local_part(length: int = 10) -> str:
 
 def make_email(local_part: str) -> str:
     return f"{local_part}@{DOMAIN}"
+
+
+def remember_email(user_id: int, email: str) -> None:
+    lst = user_emails.setdefault(user_id, [])
+    if email not in lst:
+        lst.append(email)
+    user_last_email[user_id] = email
+    email_owner[email] = user_id
 
 
 def start_text(last_email: Optional[str]) -> str:
@@ -104,108 +107,28 @@ def format_inbound_message(to_email: str, sender: str, subject: str, body: str) 
     )
 
 
-def _normalize_db_url(url: str) -> str:
-    """
-    Railway DATABASE_URL قد يأتي مع sslmode=require
-    asyncpg لا يحب sslmode كـ query param أحيانًا، فبنحذفه ونخلي SSL بالاتصال.
-    """
-    if not url:
-        return url
-    u = urlparse(url)
-    q = dict(parse_qsl(u.query, keep_blank_values=True))
-    q.pop("sslmode", None)
-    new_query = urlencode(q)
-    return urlunparse((u.scheme, u.netloc, u.path, u.params, new_query, u.fragment))
+# ✅ جديد: استخراج الإيميلات من أي نص (Name <email> / multiple recipients / commas)
+_EMAIL_RE = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})", re.IGNORECASE)
 
 
-async def db_init():
-    global db_pool
-    if not DATABASE_URL:
-        raise RuntimeError("Missing DATABASE_URL env var (Railway Postgres connection string)")
-
-    clean_url = _normalize_db_url(DATABASE_URL)
-
-    # نحاول SSL require (آمن على Railway)
-    db_pool = await asyncpg.create_pool(
-        dsn=clean_url,
-        ssl="require",
-        min_size=1,
-        max_size=5,
-    )
-
-    async with db_pool.acquire() as conn:
-        # جدول المستخدمين (آخر بريد)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS tg_users (
-            user_id BIGINT PRIMARY KEY,
-            last_email TEXT,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        """)
-
-        # جدول البريدات
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS tg_emails (
-            email TEXT PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        """)
-
-        # فهرس للمستخدم لتسريع جلب بريداته
-        await conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_tg_emails_user_id ON tg_emails(user_id);
-        """)
-
-
-async def db_get_last_email(user_id: int) -> Optional[str]:
-    if not db_pool:
-        return None
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT last_email FROM tg_users WHERE user_id=$1", user_id)
-        return row["last_email"] if row and row["last_email"] else None
-
-
-async def db_get_my_emails(user_id: int) -> List[str]:
-    if not db_pool:
+def extract_emails(text: str) -> List[str]:
+    if not text:
         return []
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT email FROM tg_emails WHERE user_id=$1 ORDER BY created_at DESC",
-            user_id
-        )
-        return [r["email"] for r in rows]
-
-
-async def db_remember_email(user_id: int, email: str) -> None:
-    if not db_pool:
-        return
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            # خزّن البريد (لو موجود ما يعيد إدخال)
-            await conn.execute(
-                "INSERT INTO tg_emails(email, user_id) VALUES($1,$2) ON CONFLICT (email) DO NOTHING",
-                email, user_id
-            )
-            # حدّث آخر بريد للمستخدم
-            await conn.execute("""
-            INSERT INTO tg_users(user_id, last_email) VALUES($1,$2)
-            ON CONFLICT (user_id) DO UPDATE
-            SET last_email=EXCLUDED.last_email, updated_at=NOW()
-            """, user_id, email)
-
-
-async def db_get_owner_by_email(email: str) -> Optional[int]:
-    if not db_pool:
-        return None
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT user_id FROM tg_emails WHERE email=$1", email)
-        return int(row["user_id"]) if row else None
+    found = _EMAIL_RE.findall(text)
+    # Normalize + unique preserve order
+    seen = set()
+    out: List[str] = []
+    for e in found:
+        e2 = e.strip().lower()
+        if e2 and e2 not in seen:
+            seen.add(e2)
+            out.append(e2)
+    return out
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    last = await db_get_last_email(uid)
+    last = user_last_email.get(uid)
     await update.message.reply_text(
         start_text(last),
         reply_markup=main_keyboard(),
@@ -227,7 +150,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "random_email":
         email = make_email(random_local_part())
-        await db_remember_email(uid, email)
+        remember_email(uid, email)
         await q.edit_message_text(
             f"تم إنشاء بريد إلكتروني جديد ✅\n\n- البريد الإلكتروني الجديد:\n`{email}`",
             parse_mode=ParseMode.MARKDOWN,
@@ -236,7 +159,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "copy_email":
-        last = await db_get_last_email(uid)
+        last = user_last_email.get(uid)
         if not last:
             await q.edit_message_text(
                 "❌ لم يتم إنشاء بريد بعد",
@@ -247,7 +170,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "my_emails":
-        emails = await db_get_my_emails(uid)
+        emails = user_emails.get(uid, [])
         if not emails:
             await q.edit_message_text(
                 "📁 لا يوجد بريدات تم إنشاؤها بعد.",
@@ -262,7 +185,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "back":
-        last = await db_get_last_email(uid)
+        last = user_last_email.get(uid)
         await q.edit_message_text(
             start_text(last),
             parse_mode=ParseMode.MARKDOWN,
@@ -283,7 +206,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     waiting_for_name.discard(uid)
     email = make_email(local)
-    await db_remember_email(uid, email)
+    remember_email(uid, email)
     await update.message.reply_text(
         f"تم إنشاء بريد إلكتروني جديد ✅\n\n- البريد الإلكتروني الجديد:\n`{email}`",
         parse_mode=ParseMode.MARKDOWN,
@@ -291,12 +214,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+app = FastAPI()
+tg_app: Optional[Application] = None
+
+
 @app.on_event("startup")
 async def startup():
     global tg_app
-
-    # ✅ DB init (يخلق الجداول تلقائياً)
-    await db_init()
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
@@ -306,7 +230,7 @@ async def startup():
     await tg_app.initialize()
     await tg_app.start()
 
-    # ✅ تعيين Webhook تلقائياً (إذا PUBLIC_URL موجود)
+    # ✅ المهم: تعيين Webhook تلقائياً
     if PUBLIC_URL:
         webhook_url = f"{PUBLIC_URL}{TG_WEBHOOK_PATH}"
         await tg_app.bot.set_webhook(
@@ -333,21 +257,14 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global db_pool
     if tg_app:
         try:
+            # تنظيف webhook (اختياري)
             await tg_app.bot.delete_webhook(drop_pending_updates=True)
         except Exception:
             pass
         await tg_app.stop()
         await tg_app.shutdown()
-
-    if db_pool:
-        try:
-            await db_pool.close()
-        except Exception:
-            pass
-        db_pool = None
 
 
 @app.get("/")
@@ -386,27 +303,38 @@ async def mailgun_inbound(request: Request):
             raise HTTPException(status_code=403, detail="Bad mailgun secret")
 
     form = await request.form()
-    to_email = str(form.get("recipient", "")).strip().lower()
+
+    # ✅ بدل اعتماد recipient فقط: نجمع كل الحقول المحتملة ونستخرج منها الإيميلات
+    recipient_raw = str(form.get("recipient", "") or "")
+    to_raw = str(form.get("To", "") or form.get("to", "") or "")
+    envelope_to_raw = str(form.get("envelope", "") or "")  # أحياناً يحتوي JSON أو نص فيه email
+
+    candidates_text = " , ".join([recipient_raw, to_raw, envelope_to_raw]).strip()
+    recipients = extract_emails(candidates_text)
+
     sender = str(form.get("sender", "")).strip()
     subject = str(form.get("subject", "")).strip()
     body = str(form.get("stripped-text") or form.get("body-plain") or "").strip()
 
-    if not to_email:
+    if not recipients:
         return {"ok": True}
 
-    owner_id = await db_get_owner_by_email(to_email)
-    if not owner_id:
-        return {"ok": True}
+    sent_any = False
+    for to_email in recipients:
+        owner_id = email_owner.get(to_email)
+        if not owner_id:
+            continue
 
-    msg = format_inbound_message(to_email, sender, subject, body)
-    try:
-        await tg_app.bot.send_message(
-            chat_id=owner_id,
-            text=msg,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        pass
+        msg = format_inbound_message(to_email, sender, subject, body)
+        try:
+            await tg_app.bot.send_message(
+                chat_id=owner_id,
+                text=msg,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            sent_any = True
+        except Exception:
+            pass
 
-    return {"ok": True}
+    return {"ok": True, "delivered": sent_any}
