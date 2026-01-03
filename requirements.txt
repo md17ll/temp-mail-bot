@@ -1,4 +1,4 @@
+fastapi
 python-telegram-bot==21.6
-fastapi==0.115.6
-uvicorn==0.32.1
-python-multipart==0.0.12
+uvicorn
+asyncpg==0.29.0
