@@ -16,7 +16,10 @@ from telegram.ext import (
     filters,
 )
 
-# ✅ إضافة تخزين دائم على Volume (/data)
+# ✅ مهم: للهروب من مشاكل Markdown
+from telegram.helpers import escape_markdown
+
+# ✅ تخزين دائم على Volume (/data)
 import json
 from pathlib import Path
 
@@ -33,8 +36,8 @@ def load_state() -> None:
             user_emails = {int(k): v for k, v in (data.get("user_emails") or {}).items()}
             user_last_email = {int(k): v for k, v in (data.get("user_last_email") or {}).items()}
             email_owner = (data.get("email_owner") or {})
-    except Exception:
-        # لا توقف البوت إذا صار خطأ
+    except Exception as e:
+        print("load_state error:", repr(e))
         user_emails = {}
         user_last_email = {}
         email_owner = {}
@@ -49,15 +52,13 @@ def save_state() -> None:
             "email_owner": email_owner,
         }
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        print("save_state error:", repr(e))
 
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DOMAIN = os.environ.get("DOMAIN", "mg.abdr.tax").strip().lower()
 
-# رابط تطبيقك على Railway مثال:
-# https://web-production-5256.up.railway.app
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
 
 TG_WEBHOOK_PATH = os.environ.get("TG_WEBHOOK_PATH", "/telegram").strip()
@@ -73,7 +74,6 @@ OWNER_ID: Optional[int] = int(OWNER_ID_RAW) if OWNER_ID_RAW.isdigit() else None
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN env var")
 
-# بدون تخزين دائم (RAM فقط)
 user_emails: Dict[int, List[str]] = {}
 user_last_email: Dict[int, str] = {}
 waiting_for_name: Set[int] = set()
@@ -103,7 +103,6 @@ def remember_email(user_id: int, email: str) -> None:
         lst.append(email)
     user_last_email[user_id] = email
     email_owner[email] = user_id
-    # ✅ حفظ بعد كل إنشاء/تعديل
     save_state()
 
 
@@ -137,16 +136,22 @@ def format_inbound_message(to_email: str, sender: str, subject: str, body: str) 
     body = (body or "").strip()
     if len(body) > 3500:
         body = body[:3500] + "\n…"
+
+    # ✅ Escape Markdown حتى ما تفشل الرسالة
+    to_email_e = escape_markdown(to_email or "", version=2)
+    sender_e = escape_markdown(sender or "", version=2)
+    subject_e = escape_markdown(subject or "", version=2)
+    body_e = escape_markdown(body or "(بدون نص)", version=2)
+
     return (
         "📩 وصلت رسالة جديدة\n\n"
-        f"إلى: `{to_email}`\n"
-        f"من: {sender}\n"
-        f"العنوان: {subject}\n\n"
-        f"{body if body else '(بدون نص)'}"
+        f"إلى: `{to_email_e}`\n"
+        f"من: {sender_e}\n"
+        f"العنوان: {subject_e}\n\n"
+        f"{body_e}"
     )
 
 
-# ✅ جديد: استخراج الإيميلات من أي نص (Name <email> / multiple recipients / commas)
 _EMAIL_RE = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})", re.IGNORECASE)
 
 
@@ -154,7 +159,6 @@ def extract_emails(text: str) -> List[str]:
     if not text:
         return []
     found = _EMAIL_RE.findall(text)
-    # Normalize + unique preserve order
     seen = set()
     out: List[str] = []
     for e in found:
@@ -260,8 +264,6 @@ tg_app: Optional[Application] = None
 @app.on_event("startup")
 async def startup():
     global tg_app
-
-    # ✅ تحميل البيانات المحفوظة عند التشغيل
     load_state()
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
@@ -272,7 +274,6 @@ async def startup():
     await tg_app.initialize()
     await tg_app.start()
 
-    # ✅ المهم: تعيين Webhook تلقائياً
     if PUBLIC_URL:
         webhook_url = f"{PUBLIC_URL}{TG_WEBHOOK_PATH}"
         await tg_app.bot.set_webhook(
@@ -280,8 +281,10 @@ async def startup():
             secret_token=TG_SECRET_TOKEN if TG_SECRET_TOKEN else None,
             drop_pending_updates=True,
         )
+        print("Telegram webhook set to:", webhook_url)
+    else:
+        print("WARNING: PUBLIC_URL is empty, webhook not set!")
 
-    # ✅ (اختياري) رسالة تأكيد للمالك
     if OWNER_ID:
         try:
             msg = "✅ Bot started"
@@ -293,18 +296,17 @@ async def startup():
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print("Owner notify error:", repr(e))
 
 
 @app.on_event("shutdown")
 async def shutdown():
     if tg_app:
         try:
-            # تنظيف webhook (اختياري)
             await tg_app.bot.delete_webhook(drop_pending_updates=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("delete_webhook error:", repr(e))
         await tg_app.stop()
         await tg_app.shutdown()
 
@@ -346,10 +348,9 @@ async def mailgun_inbound(request: Request):
 
     form = await request.form()
 
-    # ✅ بدل اعتماد recipient فقط: نجمع كل الحقول المحتملة ونستخرج منها الإيميلات
     recipient_raw = str(form.get("recipient", "") or "")
     to_raw = str(form.get("To", "") or form.get("to", "") or "")
-    envelope_to_raw = str(form.get("envelope", "") or "")  # أحياناً يحتوي JSON أو نص فيه email
+    envelope_to_raw = str(form.get("envelope", "") or "")
 
     candidates_text = " , ".join([recipient_raw, to_raw, envelope_to_raw]).strip()
     recipients = extract_emails(candidates_text)
@@ -358,6 +359,8 @@ async def mailgun_inbound(request: Request):
     subject = str(form.get("subject", "")).strip()
     body = str(form.get("stripped-text") or form.get("body-plain") or "").strip()
 
+    print("MAILGUN INBOUND recipients:", recipients, "sender:", sender, "subject:", subject)
+
     if not recipients:
         return {"ok": True}
 
@@ -365,6 +368,7 @@ async def mailgun_inbound(request: Request):
     for to_email in recipients:
         owner_id = email_owner.get(to_email)
         if not owner_id:
+            print("No owner for:", to_email)
             continue
 
         msg = format_inbound_message(to_email, sender, subject, body)
@@ -372,11 +376,11 @@ async def mailgun_inbound(request: Request):
             await tg_app.bot.send_message(
                 chat_id=owner_id,
                 text=msg,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.MARKDOWN_V2,  # ✅ صار آمن بعد escape
                 disable_web_page_preview=True,
             )
             sent_any = True
-        except Exception:
-            pass
+        except Exception as e:
+            print("Telegram send_message error:", repr(e))
 
     return {"ok": True, "delivered": sent_any}
