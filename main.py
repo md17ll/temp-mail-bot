@@ -16,6 +16,43 @@ from telegram.ext import (
     filters,
 )
 
+# ✅ إضافة تخزين دائم على Volume (/data)
+import json
+from pathlib import Path
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+STATE_FILE = DATA_DIR / "state.json"
+
+
+def load_state() -> None:
+    global user_emails, user_last_email, email_owner
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if STATE_FILE.exists():
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            user_emails = {int(k): v for k, v in (data.get("user_emails") or {}).items()}
+            user_last_email = {int(k): v for k, v in (data.get("user_last_email") or {}).items()}
+            email_owner = (data.get("email_owner") or {})
+    except Exception:
+        # لا توقف البوت إذا صار خطأ
+        user_emails = {}
+        user_last_email = {}
+        email_owner = {}
+
+
+def save_state() -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "user_emails": {str(k): v for k, v in user_emails.items()},
+            "user_last_email": {str(k): v for k, v in user_last_email.items()},
+            "email_owner": email_owner,
+        }
+        STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DOMAIN = os.environ.get("DOMAIN", "mg.abdr.tax").strip().lower()
 
@@ -66,6 +103,8 @@ def remember_email(user_id: int, email: str) -> None:
         lst.append(email)
     user_last_email[user_id] = email
     email_owner[email] = user_id
+    # ✅ حفظ بعد كل إنشاء/تعديل
+    save_state()
 
 
 def start_text(last_email: Optional[str]) -> str:
@@ -221,6 +260,9 @@ tg_app: Optional[Application] = None
 @app.on_event("startup")
 async def startup():
     global tg_app
+
+    # ✅ تحميل البيانات المحفوظة عند التشغيل
+    load_state()
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
