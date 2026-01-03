@@ -107,6 +107,25 @@ def format_inbound_message(to_email: str, sender: str, subject: str, body: str) 
     )
 
 
+# ✅ جديد: استخراج الإيميلات من أي نص (Name <email> / multiple recipients / commas)
+_EMAIL_RE = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})", re.IGNORECASE)
+
+
+def extract_emails(text: str) -> List[str]:
+    if not text:
+        return []
+    found = _EMAIL_RE.findall(text)
+    # Normalize + unique preserve order
+    seen = set()
+    out: List[str] = []
+    for e in found:
+        e2 = e.strip().lower()
+        if e2 and e2 not in seen:
+            seen.add(e2)
+            out.append(e2)
+    return out
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     last = user_last_email.get(uid)
@@ -284,27 +303,38 @@ async def mailgun_inbound(request: Request):
             raise HTTPException(status_code=403, detail="Bad mailgun secret")
 
     form = await request.form()
-    to_email = str(form.get("recipient", "")).strip().lower()
+
+    # ✅ بدل اعتماد recipient فقط: نجمع كل الحقول المحتملة ونستخرج منها الإيميلات
+    recipient_raw = str(form.get("recipient", "") or "")
+    to_raw = str(form.get("To", "") or form.get("to", "") or "")
+    envelope_to_raw = str(form.get("envelope", "") or "")  # أحياناً يحتوي JSON أو نص فيه email
+
+    candidates_text = " , ".join([recipient_raw, to_raw, envelope_to_raw]).strip()
+    recipients = extract_emails(candidates_text)
+
     sender = str(form.get("sender", "")).strip()
     subject = str(form.get("subject", "")).strip()
     body = str(form.get("stripped-text") or form.get("body-plain") or "").strip()
 
-    if not to_email:
+    if not recipients:
         return {"ok": True}
 
-    owner_id = email_owner.get(to_email)
-    if not owner_id:
-        return {"ok": True}
+    sent_any = False
+    for to_email in recipients:
+        owner_id = email_owner.get(to_email)
+        if not owner_id:
+            continue
 
-    msg = format_inbound_message(to_email, sender, subject, body)
-    try:
-        await tg_app.bot.send_message(
-            chat_id=owner_id,
-            text=msg,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        pass
+        msg = format_inbound_message(to_email, sender, subject, body)
+        try:
+            await tg_app.bot.send_message(
+                chat_id=owner_id,
+                text=msg,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            sent_any = True
+        except Exception:
+            pass
 
-    return {"ok": True}
+    return {"ok": True, "delivered": sent_any}
