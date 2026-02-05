@@ -82,7 +82,7 @@ user_last_email: Dict[int, str] = {}
 waiting_for_name: Set[int] = set()
 email_owner: Dict[str, int] = {}
 
-# ✅ (إضافة) حظر/فك حظر
+# ✅ (إضافة فقط) حظر/فك حظر
 blocked_users: Set[int] = set()
 admin_waiting_block: Set[int] = set()
 admin_waiting_unblock: Set[int] = set()
@@ -98,7 +98,7 @@ def is_blocked(user_id: int) -> bool:
 
 def parse_target_user_id(text: str) -> Optional[int]:
     t = (text or "").strip()
-    m = re.search(r"\d{5,}", t)  # يلتقط أي رقم طويل (ID)
+    m = re.search(r"\d{5,}", t)
     if not m:
         return None
     try:
@@ -160,7 +160,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ✅ (إضافة) نفس الكيبورد + زر الأدمن يظهر للأدمن فقط
+# ✅ (إضافة فقط) نفس الكيبورد + زر الأدمن يظهر للأدمن فقط
 def main_keyboard_for(uid: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("✏️ اختر اسم", callback_data="choose_name")],
@@ -220,7 +220,7 @@ def extract_emails(text: str) -> List[str]:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # ✅ (إضافة) منع المحظورين
+    # ✅ (إضافة فقط) منع المحظورين
     if is_blocked(uid) and not is_admin(uid):
         await update.message.reply_text("🚫 أنت محظور من استخدام البوت.")
         return
@@ -240,12 +240,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     data = q.data
 
-    # ✅ (إضافة) منع المحظورين
+    # ✅ (إضافة فقط) منع المحظورين
     if is_blocked(uid) and not is_admin(uid):
         await q.answer("🚫 أنت محظور.", show_alert=True)
         return
 
-    # ✅ (إضافة) قائمة الأدمن
+    # ✅ (إضافة فقط) قائمة الأدمن
     if data == "admin_menu":
         if not is_admin(uid):
             await q.answer("غير مصرح", show_alert=True)
@@ -253,7 +253,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🛠️ لوحة الأدمن:", reply_markup=admin_keyboard())
         return
 
-    # ✅ (إضافة) حظر شخص
+    # ✅ (إضافة فقط) حظر شخص
     if data == "admin_block":
         if not is_admin(uid):
             await q.answer("غير مصرح", show_alert=True)
@@ -266,7 +266,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ✅ (إضافة) فك حظر شخص
+    # ✅ (إضافة فقط) فك حظر شخص
     if data == "admin_unblock":
         if not is_admin(uid):
             await q.answer("غير مصرح", show_alert=True)
@@ -334,11 +334,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
-    # ✅ (إضافة) منع المحظورين
+    # ✅ (إضافة فقط) منع المحظورين
     if is_blocked(uid) and not is_admin(uid):
         return
 
-    # ✅ (إضافة) استقبال ID للحظر/فك الحظر من الأدمن
+    # ✅ (إضافة فقط) استقبال ID للحظر/فك الحظر من الأدمن
     if uid in admin_waiting_block:
         target_id = parse_target_user_id(update.message.text or "")
         if not target_id:
@@ -494,6 +494,11 @@ async def mailgun_inbound(request: Request):
         owner_id = email_owner.get(to_email)
         if not owner_id:
             print("No owner for:", to_email)
+            continue
+
+        # ✅ (إضافة فقط) إذا صاحب الإيميل محظور لا يتم إرسال الرسائل له
+        if owner_id in blocked_users and (not OWNER_ID or owner_id != OWNER_ID):
+            print("Blocked owner, skip deliver to:", owner_id, "email:", to_email)
             continue
 
         msg = format_inbound_message(to_email, sender, subject, body)
