@@ -28,7 +28,7 @@ STATE_FILE = DATA_DIR / "state.json"
 
 
 def load_state() -> None:
-    global user_emails, user_last_email, email_owner
+    global user_emails, user_last_email, email_owner, blocked_users
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         if STATE_FILE.exists():
@@ -36,11 +36,13 @@ def load_state() -> None:
             user_emails = {int(k): v for k, v in (data.get("user_emails") or {}).items()}
             user_last_email = {int(k): v for k, v in (data.get("user_last_email") or {}).items()}
             email_owner = (data.get("email_owner") or {})
+            blocked_users = set(int(x) for x in (data.get("blocked_users") or []))
     except Exception as e:
         print("load_state error:", repr(e))
         user_emails = {}
         user_last_email = {}
         email_owner = {}
+        blocked_users = set()
 
 
 def save_state() -> None:
@@ -50,6 +52,7 @@ def save_state() -> None:
             "user_emails": {str(k): v for k, v in user_emails.items()},
             "user_last_email": {str(k): v for k, v in user_last_email.items()},
             "email_owner": email_owner,
+            "blocked_users": sorted(list(blocked_users)),
         }
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
@@ -78,6 +81,38 @@ user_emails: Dict[int, List[str]] = {}
 user_last_email: Dict[int, str] = {}
 waiting_for_name: Set[int] = set()
 email_owner: Dict[str, int] = {}
+
+# ✅ (إضافة) حظر/فك حظر
+blocked_users: Set[int] = set()
+admin_waiting_block: Set[int] = set()
+admin_waiting_unblock: Set[int] = set()
+
+
+def is_admin(user_id: int) -> bool:
+    return bool(OWNER_ID) and user_id == OWNER_ID
+
+
+def is_blocked(user_id: int) -> bool:
+    return user_id in blocked_users
+
+
+def parse_target_user_id(text: str) -> Optional[int]:
+    t = (text or "").strip()
+    m = re.search(r"\d{5,}", t)  # يلتقط أي رقم طويل (ID)
+    if not m:
+        return None
+    try:
+        return int(m.group(0))
+    except Exception:
+        return None
+
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 حظر شخص", callback_data="admin_block")],
+        [InlineKeyboardButton("✅ فك حظر شخص", callback_data="admin_unblock")],
+        [InlineKeyboardButton("🔙 عودة", callback_data="back")],
+    ])
 
 
 def sanitize_local_part(raw: str) -> str:
@@ -123,6 +158,19 @@ def main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 انسخ البريد الإلكتروني", callback_data="copy_email")],
         [InlineKeyboardButton("📁 بريدي الخاص", callback_data="my_emails")],
     ])
+
+
+# ✅ (إضافة) نفس الكيبورد + زر الأدمن يظهر للأدمن فقط
+def main_keyboard_for(uid: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("✏️ اختر اسم", callback_data="choose_name")],
+        [InlineKeyboardButton("🎲 إنشاء بريد عشوائي", callback_data="random_email")],
+        [InlineKeyboardButton("📋 انسخ البريد الإلكتروني", callback_data="copy_email")],
+        [InlineKeyboardButton("📁 بريدي الخاص", callback_data="my_emails")],
+    ]
+    if is_admin(uid):
+        rows.append([InlineKeyboardButton("🛠️ Admin", callback_data="admin_menu")])
+    return InlineKeyboardMarkup(rows)
 
 
 def format_my_emails(emails: List[str]) -> str:
@@ -171,10 +219,16 @@ def extract_emails(text: str) -> List[str]:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # ✅ (إضافة) منع المحظورين
+    if is_blocked(uid) and not is_admin(uid):
+        await update.message.reply_text("🚫 أنت محظور من استخدام البوت.")
+        return
+
     last = user_last_email.get(uid)
     await update.message.reply_text(
         start_text(last),
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard_for(uid),
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
     )
@@ -185,6 +239,45 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     data = q.data
+
+    # ✅ (إضافة) منع المحظورين
+    if is_blocked(uid) and not is_admin(uid):
+        await q.answer("🚫 أنت محظور.", show_alert=True)
+        return
+
+    # ✅ (إضافة) قائمة الأدمن
+    if data == "admin_menu":
+        if not is_admin(uid):
+            await q.answer("غير مصرح", show_alert=True)
+            return
+        await q.edit_message_text("🛠️ لوحة الأدمن:", reply_markup=admin_keyboard())
+        return
+
+    # ✅ (إضافة) حظر شخص
+    if data == "admin_block":
+        if not is_admin(uid):
+            await q.answer("غير مصرح", show_alert=True)
+            return
+        admin_waiting_block.add(uid)
+        admin_waiting_unblock.discard(uid)
+        await q.edit_message_text(
+            "🚫 أرسل الآن ID الشخص المراد حظره:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_menu")]]),
+        )
+        return
+
+    # ✅ (إضافة) فك حظر شخص
+    if data == "admin_unblock":
+        if not is_admin(uid):
+            await q.answer("غير مصرح", show_alert=True)
+            return
+        admin_waiting_unblock.add(uid)
+        admin_waiting_block.discard(uid)
+        await q.edit_message_text(
+            "✅ أرسل الآن ID الشخص المراد فك حظره:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_menu")]]),
+        )
+        return
 
     if data == "choose_name":
         waiting_for_name.add(uid)
@@ -232,7 +325,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             start_text(last),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard_for(uid),
             disable_web_page_preview=True,
         )
         return
@@ -240,6 +333,38 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # ✅ (إضافة) منع المحظورين
+    if is_blocked(uid) and not is_admin(uid):
+        return
+
+    # ✅ (إضافة) استقبال ID للحظر/فك الحظر من الأدمن
+    if uid in admin_waiting_block:
+        target_id = parse_target_user_id(update.message.text or "")
+        if not target_id:
+            await update.message.reply_text("❌ ارسل ID صحيح (أرقام فقط).")
+            return
+        blocked_users.add(target_id)
+        save_state()
+        admin_waiting_block.discard(uid)
+        await update.message.reply_text(f"✅ تم حظر المستخدم: `{target_id}`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if uid in admin_waiting_unblock:
+        target_id = parse_target_user_id(update.message.text or "")
+        if not target_id:
+            await update.message.reply_text("❌ ارسل ID صحيح (أرقام فقط).")
+            return
+        if target_id in blocked_users:
+            blocked_users.discard(target_id)
+            save_state()
+            admin_waiting_unblock.discard(uid)
+            await update.message.reply_text(f"✅ تم فك حظر المستخدم: `{target_id}`", parse_mode=ParseMode.MARKDOWN)
+            return
+        admin_waiting_unblock.discard(uid)
+        await update.message.reply_text("ℹ️ هذا المستخدم غير محظور أساساً.")
+        return
+
     if uid not in waiting_for_name:
         return
     raw = update.message.text or ""
