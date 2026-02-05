@@ -286,6 +286,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "random_email":
         email = make_email(random_local_part())
+
+        # ✅ (إضافة فقط) منع التصادم/سرقة الإيميل: إذا محجوز لغيرك ولّد غيره
+        while True:
+            existing_owner = email_owner.get(email)
+            if not existing_owner or existing_owner == uid:
+                break
+            email = make_email(random_local_part())
+
         remember_email(uid, email)
         await q.edit_message_text(
             f"تم إنشاء بريد إلكتروني جديد ✅\n\n- البريد الإلكتروني الجديد:\n`{email}`",
@@ -374,6 +382,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     waiting_for_name.discard(uid)
     email = make_email(local)
+
+    # ✅ (إضافة فقط) منع استخدام نفس الإيميل لشخص ثاني
+    existing_owner = email_owner.get(email)
+    if existing_owner and existing_owner != uid:
+        await update.message.reply_text("❌ هذا البريد محجوز لشخص آخر. اختر اسم مختلف.")
+        return
+
     remember_email(uid, email)
     await update.message.reply_text(
         f"تم إنشاء بريد إلكتروني جديد ✅\n\n- البريد الإلكتروني الجديد:\n`{email}`",
