@@ -1,5 +1,5 @@
 fastapi
-python-telegram-bot==21.6
+python-telegram-bot==22.8
 uvicorn
 asyncpg==0.29.0
 python-multipart
