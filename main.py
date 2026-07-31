@@ -55,7 +55,6 @@ blocked_users: Set[int] = set()
 subscriptions: Dict[int, Dict[str, Any]] = {}
 known_users: Dict[int, Dict[str, Any]] = {}
 admin_reply_targets: Dict[int, int] = {}
-admin_logs: List[Dict[str, str]] = []
 notification_settings: Dict[str, bool] = {
     "new_users": True,
     "forward_messages": True,
@@ -89,7 +88,7 @@ def str_to_dt(value: Any) -> Optional[datetime]:
 
 def load_state() -> None:
     global user_emails, user_last_email, email_owner, blocked_users
-    global subscriptions, known_users, admin_reply_targets, admin_logs, notification_settings
+    global subscriptions, known_users, admin_reply_targets, notification_settings
 
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,7 +116,6 @@ def load_state() -> None:
         admin_reply_targets = {
             int(k): int(v) for k, v in (data.get("admin_reply_targets") or {}).items()
         }
-        admin_logs = list(data.get("admin_logs") or [])[-200:]
 
         saved_settings = data.get("notification_settings") or {}
         notification_settings.update(
@@ -136,7 +134,6 @@ def load_state() -> None:
         subscriptions = {}
         known_users = {}
         admin_reply_targets = {}
-        admin_logs = []
         notification_settings = {
             "new_users": True,
             "forward_messages": True,
@@ -157,7 +154,6 @@ def save_state() -> None:
             "admin_reply_targets": {
                 str(k): v for k, v in list(admin_reply_targets.items())[-2000:]
             },
-            "admin_logs": admin_logs[-200:],
             "notification_settings": notification_settings,
         }
         temp_file = STATE_FILE.with_suffix(".tmp")
@@ -170,9 +166,8 @@ def save_state() -> None:
 
 
 def add_admin_log(action: str) -> None:
-    admin_logs.append({"time": dt_to_str(now_utc()), "action": action})
-    del admin_logs[:-200]
-    save_state()
+    """وظيفة توافقية بلا تخزين."""
+    return
 
 
 def is_admin(user_id: int) -> bool:
@@ -271,34 +266,82 @@ def back_button(callback_data: str = "back") -> InlineKeyboardMarkup:
 
 
 def admin_keyboard() -> InlineKeyboardMarkup:
+    """القائمة الرئيسية للأدمن بشكل هرمي ومقسمة حسب الوظائف."""
     return InlineKeyboardMarkup(
         [
+            [make_button("👑 إدارة الاشتراكات", "admin_section_subscriptions", "success")],
             [
-                make_button("➕ إضافة مستخدم", "admin_add_user", "success"),
-                make_button("⏳ تمديد اشتراك", "admin_extend", "primary"),
+                make_button("🔎 البحث والبريد", "admin_section_search", "primary"),
+                make_button("📊 المتابعة", "admin_section_monitor", "primary"),
             ],
             [
-                make_button("❌ إلغاء اشتراك", "admin_cancel_sub", "danger"),
+                make_button("📣 التواصل", "admin_section_communication", "success"),
+                make_button("🛡️ الحماية", "admin_section_security", "danger"),
+            ],
+            [make_button("🔙 عودة", "back", "primary")],
+        ]
+    )
+
+
+def admin_subscriptions_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [make_button("➕ إضافة مستخدم", "admin_add_user", "success")],
+            [
+                make_button("⏳ تمديد اشتراك", "admin_extend", "primary"),
                 make_button("👥 المستخدمون", "admin_users", "primary"),
             ],
             [
                 make_button("⌛ قرب الانتهاء", "admin_expiring", "primary"),
-                make_button("🔍 بحث عن مستخدم", "admin_search", "primary"),
+                make_button("❌ إلغاء اشتراك", "admin_cancel_sub", "danger"),
             ],
+            [make_button("🔙 لوحة الأدمن", "admin_menu", "primary")],
+        ]
+    )
+
+
+def admin_search_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [make_button("🔍 بحث عن مستخدم", "admin_search", "primary")],
             [
-                make_button("📧 إدارة البريدات", "admin_manage_emails", "primary"),
-                make_button("📊 الإحصائيات", "admin_stats", "primary"),
+                make_button("📧 بحث عن بريد", "admin_search_email", "success"),
+                make_button("📬 إدارة البريدات", "admin_manage_emails", "primary"),
             ],
-            [
-                make_button("📢 رسالة جماعية", "admin_broadcast", "success"),
-                make_button("🔔 التنبيهات", "admin_notifications", "primary"),
-            ],
+            [make_button("🔙 لوحة الأدمن", "admin_menu", "primary")],
+        ]
+    )
+
+
+def admin_monitor_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [make_button("📊 الإحصائيات", "admin_stats", "primary")],
+            [make_button("👥 المستخدمون الفعالون", "admin_users", "success")],
+            [make_button("⌛ قرب الانتهاء", "admin_expiring", "primary")],
+            [make_button("🔙 لوحة الأدمن", "admin_menu", "primary")],
+        ]
+    )
+
+
+def admin_communication_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [make_button("📢 رسالة جماعية", "admin_broadcast", "success")],
+            [make_button("🔔 إعدادات التنبيهات", "admin_notifications", "primary")],
+            [make_button("🔙 لوحة الأدمن", "admin_menu", "primary")],
+        ]
+    )
+
+
+def admin_security_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [
                 make_button("🚫 حظر شخص", "admin_block", "danger"),
                 make_button("✅ فك الحظر", "admin_unblock", "success"),
             ],
-            [make_button("📝 سجل العمليات", "admin_logs", "primary")],
-            [make_button("🔙 عودة", "back", "primary")],
+            [make_button("🔙 لوحة الأدمن", "admin_menu", "primary")],
         ]
     )
 
@@ -316,7 +359,7 @@ def subscription_duration_keyboard(action: str, target_id: int) -> InlineKeyboar
                 make_button("1 سنة", prefix + "365", "primary"),
             ],
             [make_button("غير محدد", prefix + "permanent", "success")],
-            [make_button("🔙 رجوع", "admin_menu", "primary")],
+            [make_button("🔙 إدارة الاشتراكات", "admin_section_subscriptions", "primary")],
         ]
     )
 
@@ -352,7 +395,7 @@ def notifications_keyboard() -> InlineKeyboardMarkup:
                     else "danger",
                 )
             ],
-            [make_button("🔙 رجوع", "admin_menu", "primary")],
+            [make_button("🔙 التواصل", "admin_section_communication", "primary")],
         ]
     )
 
@@ -420,11 +463,14 @@ def main_keyboard() -> InlineKeyboardMarkup:
 
 
 def main_keyboard_for(uid: int) -> InlineKeyboardMarkup:
+    # ترتيب هرمي وألوان حسب نوع الإجراء.
     rows = [
-        [make_button("✏️ اختر اسم", "choose_name", "primary")],
         [make_button("🎲 إنشاء بريد عشوائي", "random_email", "success")],
-        [make_button("📋 انسخ البريد الإلكتروني", "copy_email", "primary")],
-        [make_button("📁 بريدي الخاص", "my_emails", "primary")],
+        [
+            make_button("✏️ اختر اسم", "choose_name", "primary"),
+            make_button("📋 انسخ البريد", "copy_email", "primary"),
+        ],
+        [make_button("📁 بريدي الخاص", "my_emails", "success")],
     ]
     if is_admin(uid):
         rows.append([make_button("🛠️ Admin", "admin_menu", "primary")])
@@ -706,7 +752,7 @@ async def send_user_profile(
                     "primary",
                 )
             ],
-            [make_button("🔙 رجوع", "admin_menu", "primary")],
+            [make_button("🔙 البحث والبريد", "admin_section_search", "primary")],
         ]
     )
     await message.reply_text(text, reply_markup=keyboard)
@@ -733,12 +779,73 @@ def find_user(query: str) -> Optional[int]:
     return None
 
 
+def normalize_email_query(value: str) -> Optional[str]:
+    candidates = extract_emails(value)
+    if candidates:
+        return candidates[0]
+    normalized = (value or "").strip().lower()
+    if re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", normalized):
+        return normalized
+    return None
+
+
+async def send_email_search_result(message: Any, email: str) -> None:
+    owner_id = email_owner.get(email)
+    if not owner_id:
+        await message.reply_text(
+            "📧 نتيجة البحث عن البريد\n\n"
+            f"البريد: {email}\n"
+            "الحالة: غير مستخدم ومتاح للحجز.",
+            reply_markup=back_button("admin_section_search"),
+        )
+        return
+
+    profile = known_users.get(owner_id, {})
+    name = profile.get("name") or "غير معروف"
+    username = profile.get("username") or ""
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                make_button(
+                    "⏳ تمديد الاشتراك",
+                    f"admin_extend_direct:{owner_id}",
+                    "primary",
+                ),
+                make_button(
+                    "❌ إلغاء الاشتراك",
+                    f"admin_cancel_direct:{owner_id}",
+                    "danger",
+                ),
+            ],
+            [
+                make_button(
+                    "📬 إدارة بريداته",
+                    f"admin_manage_emails_direct:{owner_id}",
+                    "success",
+                )
+            ],
+            [make_button("🔙 البحث والبريد", "admin_section_search", "primary")],
+        ]
+    )
+    await message.reply_text(
+        "📧 نتيجة البحث عن البريد\n\n"
+        f"البريد: {email}\n"
+        "الحالة: مستخدم حالياً\n"
+        f"الاسم: {name}\n"
+        f"اليوزر: @{username if username else 'بدون يوزر'}\n"
+        f"ID: {owner_id}\n"
+        f"الاشتراك: {subscription_status_text(owner_id)}\n"
+        f"إجمالي بريداته: {len(user_emails.get(owner_id, []))}",
+        reply_markup=keyboard,
+    )
+
+
 async def show_admin_user_emails(message: Any, target_id: int) -> None:
     emails = user_emails.get(target_id, [])
     if not emails:
         await message.reply_text(
             f"📧 المستخدم {target_id} لا يملك أي بريد.",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_search"),
         )
         return
 
@@ -753,7 +860,7 @@ async def show_admin_user_emails(message: Any, target_id: int) -> None:
                 )
             ]
         )
-    rows.append([make_button("🔙 رجوع", "admin_menu", "primary")])
+    rows.append([make_button("🔙 البحث والبريد", "admin_section_search", "primary")])
     await message.reply_text(
         f"📧 بريدات المستخدم {target_id}:\nاختر البريد المطلوب حذفه.",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -794,7 +901,7 @@ async def process_admin_pending(
         )
         await message.reply_text(
             f"✅ انتهى الإرسال الجماعي\nنجح: {success}\nفشل: {failed}",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_communication"),
         )
         return True
 
@@ -861,7 +968,7 @@ async def process_admin_pending(
             add_admin_log(f"حظر المستخدم {target_id}")
             await message.reply_text(
                 f"✅ تم حظر المستخدم: {target_id}",
-                reply_markup=back_button("admin_menu"),
+                reply_markup=back_button("admin_section_security"),
             )
             return True
 
@@ -871,7 +978,7 @@ async def process_admin_pending(
             add_admin_log(f"فك حظر المستخدم {target_id}")
             await message.reply_text(
                 f"✅ تم فك حظر المستخدم: {target_id}",
-                reply_markup=back_button("admin_menu"),
+                reply_markup=back_button("admin_section_security"),
             )
             return True
 
@@ -879,12 +986,24 @@ async def process_admin_pending(
             await show_admin_user_emails(message, target_id)
             return True
 
+    if action == "search_email":
+        admin_pending.pop(uid, None)
+        email = normalize_email_query(text)
+        if not email:
+            await message.reply_text(
+                "❌ أرسل بريداً إلكترونياً صحيحاً، مثال: name@example.com",
+                reply_markup=back_button("admin_section_search"),
+            )
+            return True
+        await send_email_search_result(message, email)
+        return True
+
     if action == "search":
         admin_pending.pop(uid, None)
         target_id = find_user(text)
         if target_id is None:
             await message.reply_text(
-                "❌ لم أجد المستخدم.", reply_markup=back_button("admin_menu")
+                "❌ لم أجد المستخدم.", reply_markup=back_button("admin_section_search")
             )
             return True
         await send_user_profile(message, target_id)
@@ -933,11 +1052,51 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text("🛠️ لوحة الأدمن:", reply_markup=admin_keyboard())
         return
 
+    if data == "admin_section_subscriptions" and is_admin(uid):
+        admin_pending.pop(uid, None)
+        await query.edit_message_text(
+            "👑 إدارة الاشتراكات:",
+            reply_markup=admin_subscriptions_keyboard(),
+        )
+        return
+
+    if data == "admin_section_search" and is_admin(uid):
+        admin_pending.pop(uid, None)
+        await query.edit_message_text(
+            "🔎 البحث والبريد:",
+            reply_markup=admin_search_keyboard(),
+        )
+        return
+
+    if data == "admin_section_monitor" and is_admin(uid):
+        admin_pending.pop(uid, None)
+        await query.edit_message_text(
+            "📊 المتابعة والإحصائيات:",
+            reply_markup=admin_monitor_keyboard(),
+        )
+        return
+
+    if data == "admin_section_communication" and is_admin(uid):
+        admin_pending.pop(uid, None)
+        await query.edit_message_text(
+            "📣 التواصل والتنبيهات:",
+            reply_markup=admin_communication_keyboard(),
+        )
+        return
+
+    if data == "admin_section_security" and is_admin(uid):
+        admin_pending.pop(uid, None)
+        await query.edit_message_text(
+            "🛡️ الحظر والحماية:",
+            reply_markup=admin_security_keyboard(),
+        )
+        return
+
     if data == "admin_add_user" and is_admin(uid):
         admin_pending[uid] = "add_user"
         await query.edit_message_text(
             "➕ أرسل الآن ID المستخدم الذي تريد إضافته:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_subscriptions"),
         )
         return
 
@@ -945,7 +1104,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "extend"
         await query.edit_message_text(
             "⏳ أرسل ID المستخدم الذي تريد تمديد اشتراكه:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_subscriptions"),
         )
         return
 
@@ -953,7 +1112,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "cancel_sub"
         await query.edit_message_text(
             "❌ أرسل ID المستخدم الذي تريد إلغاء اشتراكه:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_subscriptions"),
         )
         return
 
@@ -961,7 +1120,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "search"
         await query.edit_message_text(
             "🔍 أرسل ID المستخدم أو اسم المستخدم @username:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_search"),
+        )
+        return
+
+    if data == "admin_search_email" and is_admin(uid):
+        admin_pending[uid] = "search_email"
+        await query.edit_message_text(
+            "📧 أرسل البريد الإلكتروني الذي تريد معرفة صاحبه:",
+            reply_markup=back_button("admin_section_search"),
         )
         return
 
@@ -969,7 +1136,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "manage_emails"
         await query.edit_message_text(
             "📧 أرسل ID المستخدم لإدارة بريداته:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_search"),
         )
         return
 
@@ -977,7 +1144,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "block"
         await query.edit_message_text(
             "🚫 أرسل ID الشخص المراد حظره:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_security"),
         )
         return
 
@@ -985,7 +1152,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         admin_pending[uid] = "unblock"
         await query.edit_message_text(
             "✅ أرسل ID الشخص المراد فك حظره:",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_security"),
         )
         return
 
@@ -994,7 +1161,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(
             "📢 أرسل الآن الرسالة التي تريد إرسالها لكل المشتركين الفعالين.\n"
             "يمكن أن تكون نصاً أو صورة أو ملفاً.",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_communication"),
         )
         return
 
@@ -1039,7 +1206,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"الاشتراكات المنتهية: {expired}\n"
             f"المحظورون: {len(blocked_users)}\n"
             f"البريدات المحجوزة: {len(email_owner)}",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_monitor"),
         )
         return
 
@@ -1057,7 +1224,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if len(active_users) > 30:
             lines.append(f"\n… ويوجد {len(active_users) - 30} مستخدم إضافي.")
         await query.edit_message_text(
-            "\n".join(lines), reply_markup=back_button("admin_menu")
+            "\n".join(lines), reply_markup=back_button("admin_section_monitor")
         )
         return
 
@@ -1079,20 +1246,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"  باقي {remaining_days(user_id)} يوم"
             )
         await query.edit_message_text(
-            "\n".join(lines), reply_markup=back_button("admin_menu")
-        )
-        return
-
-    if data == "admin_logs" and is_admin(uid):
-        lines = ["📝 آخر عمليات الأدمن:"]
-        for item in admin_logs[-20:][::-1]:
-            when = str_to_dt(item.get("time"))
-            time_text = when.strftime("%Y-%m-%d %H:%M") if when else "وقت غير معروف"
-            lines.append(f"\n• {time_text}\n  {item.get('action', '')}")
-        if len(lines) == 1:
-            lines.append("\nلا توجد عمليات مسجلة بعد.")
-        await query.edit_message_text(
-            "\n".join(lines), reply_markup=back_button("admin_menu")
+            "\n".join(lines), reply_markup=back_button("admin_section_monitor")
         )
         return
 
@@ -1115,7 +1269,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(
             f"✅ تم {'تمديد' if action == 'extend' else 'تفعيل'} اشتراك المستخدم {target_id}\n"
             f"المدة: {'غير محدد' if days is None else f'{days} يوم'}",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_subscriptions"),
         )
         return
 
@@ -1156,7 +1310,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_text(
             f"✅ تم إلغاء اشتراك المستخدم {target_id}.\n"
             "أصبح البوت صامتاً معه، ورسائله تبقى قابلة للتحويل للأدمن.",
-            reply_markup=back_button("admin_menu"),
+            reply_markup=back_button("admin_section_subscriptions"),
         )
         return
 
@@ -1166,7 +1320,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not emails:
             await query.edit_message_text(
                 f"📧 المستخدم {target_id} لا يملك أي بريد.",
-                reply_markup=back_button("admin_menu"),
+                reply_markup=back_button("admin_section_search"),
             )
             return
         rows = [
@@ -1179,7 +1333,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ]
             for index, email in enumerate(emails)
         ]
-        rows.append([make_button("🔙 رجوع", "admin_menu", "primary")])
+        rows.append([make_button("🔙 البحث والبريد", "admin_section_search", "primary")])
         await query.edit_message_text(
             f"📧 بريدات المستخدم {target_id}:",
             reply_markup=InlineKeyboardMarkup(rows),
@@ -1193,7 +1347,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         emails = user_emails.get(target_id, [])
         if index >= len(emails):
             await query.edit_message_text(
-                "❌ البريد لم يعد موجوداً.", reply_markup=back_button("admin_menu")
+                "❌ البريد لم يعد موجوداً.", reply_markup=back_button("admin_section_search")
             )
             return
         email = emails[index]
@@ -1205,7 +1359,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"admin_email_delete_confirm:{target_id}:{index}",
                         "danger",
                     ),
-                    make_button("إلغاء", "admin_menu", "primary"),
+                    make_button("إلغاء", "admin_section_search", "primary"),
                 ]
             ]
         )
@@ -1224,7 +1378,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text = f"✅ تم حذف البريد {deleted} وأصبح متاحاً من جديد."
         else:
             text = "❌ البريد لم يعد موجوداً."
-        await query.edit_message_text(text, reply_markup=back_button("admin_menu"))
+        await query.edit_message_text(text, reply_markup=back_button("admin_section_search"))
         return
 
     if data == "choose_name":
