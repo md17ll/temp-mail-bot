@@ -1049,7 +1049,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         admin_pending.pop(uid, None)
         admin_pending_target.pop(uid, None)
-        await query.edit_message_text("🛠️ لوحة الأدمن:", reply_markup=admin_keyboard())
+        await query.edit_message_text(
+            "👋 مرحباً بك يا أدمن\n\n"
+            "🛠️ هذه لوحة التحكم الخاصة بك.\n"
+            "من هنا يمكنك إدارة الاشتراكات، البحث عن المستخدمين والبريدات، "
+            "متابعة الإحصائيات، إرسال التنبيهات، والتحكم بالحظر والحماية.\n\n"
+            "اختر القسم الذي تريد إدارته من الأزرار التالية:",
+            reply_markup=admin_keyboard(),
+        )
         return
 
     if data == "admin_section_subscriptions" and is_admin(uid):
@@ -1496,17 +1503,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
         if await process_admin_pending(update, context):
             return
-        return
+        # الأدمن يستطيع أيضاً استخدام خيار «اختر اسم» مثل أي مستخدم.
+        if user.id not in waiting_for_name:
+            return
+    else:
+        # كل رسالة من أي مستخدم تصل للأدمن قبل فحص الاشتراك.
+        await relay_user_message(update, context)
 
-    # كل رسالة من أي مستخدم تصل للأدمن قبل فحص الاشتراك.
-    await relay_user_message(update, context)
+        # المستخدم غير المسموح له لا يحصل على أي رد إطلاقاً.
+        if not has_active_subscription(user.id):
+            return
 
-    # المستخدم غير المسموح له لا يحصل على أي رد إطلاقاً.
-    if not has_active_subscription(user.id):
-        return
-
-    if user.id not in waiting_for_name:
-        return
+        if user.id not in waiting_for_name:
+            return
     if not message.text:
         await message.reply_text("❌ أرسل اسماً نصياً صالحاً.")
         return
