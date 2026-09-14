@@ -145,7 +145,9 @@ OTP_KEYWORDS = re.compile(
 )
 
 NUMERIC_CODE_RE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
-ALNUM_CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z0-9]{5,10})(?![A-Za-z0-9])")
+# Short mixed codes such as 36JF are common. They are accepted only when they
+# contain both letters and digits and have strong OTP/PIN context nearby.
+ALNUM_CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9]{4,10})(?![A-Za-z0-9])")
 
 
 def _candidate_score(text: str, start: int, end: int, candidate: str) -> int:
@@ -182,10 +184,11 @@ def _candidate_score(text: str, start: int, end: int, candidate: str) -> int:
             score -= 35
     else:
         # Alphanumeric OTPs must contain both a letter and a digit.
-        if not (re.search(r"[A-Z]", candidate) and re.search(r"\d", candidate)):
+        if not (re.search(r"[A-Za-z]", candidate) and re.search(r"\d", candidate)):
             score -= 100
         else:
-            score += 15
+            # Four-character mixed codes are valid, but context remains mandatory.
+            score += 25 if len(candidate) == 4 else 15
 
     return score
 
@@ -204,6 +207,9 @@ def extract_otp(subject: str, body: str) -> Optional[str]:
         code = match.group(1)
         if code.isdigit():
             continue
+        # Reject normal words immediately; mixed codes must contain letters + digits.
+        if not (re.search(r"[A-Za-z]", code) and re.search(r"\d", code)):
+            continue
         score = _candidate_score(combined, match.start(1), match.end(1), code)
         candidates.append((score, match.start(1), code, len(code)))
 
@@ -214,7 +220,7 @@ def extract_otp(subject: str, body: str) -> Optional[str]:
     best_score, _, best_code, _ = candidates[0]
 
     # Requiring explicit OTP/PIN context prevents buttons for order numbers,
-    # prices, years, phone numbers, or random IDs.
+    # prices, years, phone numbers, random IDs, or ordinary links.
     if best_score < 100:
         return None
     return best_code
