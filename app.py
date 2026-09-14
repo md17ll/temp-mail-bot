@@ -1,6 +1,7 @@
 from typing import Dict, List
 
 from fastapi import HTTPException, Request
+from telegram import BotCommand
 
 import main as core
 from smart_mail import (
@@ -24,6 +25,20 @@ app.router.routes[:] = [
         and "POST" in (getattr(route, "methods", set()) or set())
     )
 ]
+
+
+@app.on_event("startup")
+async def register_bot_commands() -> None:
+    """Expose /start in Telegram's command menu next to the message box."""
+    if not core.tg_app:
+        return
+    try:
+        await core.tg_app.bot.set_my_commands(
+            [BotCommand(command="start", description="تشغيل البوت")]
+        )
+        print("Telegram command menu registered: /start")
+    except Exception as exc:
+        print("set_my_commands error:", repr(exc))
 
 
 def build_email_text(to_email: str, sender: str, subject: str, body: str) -> str:
