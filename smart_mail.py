@@ -63,8 +63,6 @@ class ReadableHTMLParser(HTMLParser):
         if tag == "a" and self.link_stack:
             href, start_index = self.link_stack.pop()
             anchor_text = "".join(self.parts[start_index:]).strip()
-            # Only expose a URL when the link has visible text. This keeps useful
-            # confirmation links but drops icon-only social/tracking links.
             if href and anchor_text and href.startswith(("http://", "https://")):
                 normalized_href = unescape(href).strip()
                 if normalized_href and normalized_href not in anchor_text:
@@ -87,15 +85,11 @@ def clean_text(value: str) -> str:
     text = unescape(value or "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\u00a0", " ").replace("\u200b", "")
-
-    # Remove common invisible formatting/control characters while keeping newlines/tabs.
     text = re.sub(r"[\u200c-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
 
-    # Drop lines that are only raw CSS/import leftovers if a malformed HTML email
-    # leaked them into a text part.
     lines: List[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -124,7 +118,6 @@ def html_to_readable_text(html_value: str) -> str:
         parser.close()
         return parser.get_text()
     except Exception:
-        # Fallback: crude tag stripping is still preferable to exposing raw HTML/CSS.
         text = re.sub(r"(?is)<(script|style|head|svg|template).*?>.*?</\1>", " ", html_value)
         text = re.sub(r"(?i)<br\s*/?>", "\n", text)
         text = re.sub(r"(?i)</(p|div|tr|li|h[1-6])\s*>", "\n", text)
@@ -145,9 +138,20 @@ OTP_KEYWORDS = re.compile(
 )
 
 NUMERIC_CODE_RE = re.compile(r"(?<!\d)(\d{4,8})(?!\d)")
-# Short mixed codes such as 36JF are common. They are accepted only when they
-# contain both letters and digits and have strong OTP/PIN context nearby.
 ALNUM_CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9]{4,10})(?![A-Za-z0-9])")
+
+
+def _line_for(text: str, start: int, end: int) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    return text[line_start:line_end].strip()
+
+
+def _has_otp_context(text: str, start: int, end: int, radius: int = 180) -> bool:
+    window = text[max(0, start - radius): min(len(text), end + radius)]
+    return bool(OTP_KEYWORDS.search(window))
 
 
 def _candidate_score(text: str, start: int, end: int, candidate: str) -> int:
@@ -165,13 +169,7 @@ def _candidate_score(text: str, start: int, end: int, candidate: str) -> int:
         )
         score += max(0, 50 - distance // 4)
 
-    # Codes on their own line are commonly visually emphasized in email templates.
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    if line_end == -1:
-        line_end = len(text)
-    line = text[line_start:line_end].strip()
-    if line == candidate:
+    if _line_for(text, start, end) == candidate:
         score += 30
 
     if candidate.isdigit():
@@ -179,15 +177,24 @@ def _candidate_score(text: str, start: int, end: int, candidate: str) -> int:
             score += 20
         elif len(candidate) in (5, 7, 8):
             score += 10
-        # Avoid likely years unless context is exceptionally strong.
         if len(candidate) == 4 and candidate.startswith(("19", "20")):
             score -= 35
+    elif candidate.isalpha():
+        # Letter-only OTPs are accepted only when they are uppercase, short,
+        # displayed on their own line, and near an explicit OTP/PIN keyword.
+        if (
+            candidate.isupper()
+            and 4 <= len(candidate) <= 8
+            and _line_for(text, start, end) == candidate
+            and _has_otp_context(text, start, end)
+        ):
+            score += 25
+        else:
+            score -= 100
     else:
-        # Alphanumeric OTPs must contain both a letter and a digit.
         if not (re.search(r"[A-Za-z]", candidate) and re.search(r"\d", candidate)):
             score -= 100
         else:
-            # Four-character mixed codes are valid, but context remains mandatory.
             score += 25 if len(candidate) == 4 else 15
 
     return score
@@ -207,9 +214,18 @@ def extract_otp(subject: str, body: str) -> Optional[str]:
         code = match.group(1)
         if code.isdigit():
             continue
-        # Reject normal words immediately; mixed codes must contain letters + digits.
-        if not (re.search(r"[A-Za-z]", code) and re.search(r"\d", code)):
+
+        if code.isalpha():
+            if not (
+                code.isupper()
+                and 4 <= len(code) <= 8
+                and _line_for(combined, match.start(1), match.end(1)) == code
+                and _has_otp_context(combined, match.start(1), match.end(1))
+            ):
+                continue
+        elif not (re.search(r"[A-Za-z]", code) and re.search(r"\d", code)):
             continue
+
         score = _candidate_score(combined, match.start(1), match.end(1), code)
         candidates.append((score, match.start(1), code, len(code)))
 
@@ -219,8 +235,6 @@ def extract_otp(subject: str, body: str) -> Optional[str]:
     candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
     best_score, _, best_code, _ = candidates[0]
 
-    # Requiring explicit OTP/PIN context prevents buttons for order numbers,
-    # prices, years, phone numbers, random IDs, or ordinary links.
     if best_score < 100:
         return None
     return best_code
@@ -235,8 +249,6 @@ def otp_copy_keyboard(code: Optional[str]) -> Optional[InlineKeyboardMarkup]:
             copy_text=CopyTextButton(text=code),
         )
     except TypeError:
-        # Compatibility fallback for Telegram library builds that expose new Bot API
-        # fields via api_kwargs instead of a named constructor parameter.
         button = InlineKeyboardButton(
             text=f"📋 {code}",
             api_kwargs={"copy_text": {"text": code}},
