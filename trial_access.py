@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardMarkup
-from telegram.error import BadRequest
 
 
 class TrialStore:
@@ -26,21 +25,53 @@ class TrialStore:
                 );
                 CREATE INDEX IF NOT EXISTS trials_token ON trials(token);
             """)
+            # Additive migration: existing links keep their original one-day duration.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(links)")}
+            for name, definition in (
+                ("duration_days", "INTEGER NOT NULL DEFAULT 1"),
+                ("name", "TEXT NOT NULL DEFAULT ''"),
+                ("deleted", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE links ADD COLUMN {name} {definition}")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         return closing(db)
 
-    def create(self, now):
+    def create(self, now, duration_days=1, name=""):
+        if type(duration_days) is not int or not 1 <= duration_days <= 3650:
+            raise ValueError("Trial duration must be 1 to 3650 days")
+        if not isinstance(name, str) or len(name) > 60:
+            raise ValueError("Trial name must be at most 60 characters")
         token = secrets.token_hex(12)
         with self.connect() as db, db:
-            db.execute("INSERT INTO links(token, created) VALUES (?, ?)", (token, now))
+            db.execute("INSERT INTO links(token, created, duration_days, name) VALUES (?, ?, ?, ?)",
+                       (token, now, duration_days, name))
         return token
 
     def disable(self, token):
         with self.connect() as db, db:
             db.execute("UPDATE links SET enabled=0 WHERE token=?", (token,))
+
+    def enable(self, token):
+        with self.connect() as db, db:
+            db.execute("UPDATE links SET enabled=1 WHERE token=? AND deleted=0", (token,))
+
+    def delete(self, token):
+        # Hide/revoke the link, but retain lifetime redemption records and active trials.
+        with self.connect() as db, db:
+            db.execute("UPDATE links SET deleted=1, enabled=0 WHERE token=?", (token,))
+
+    def beneficiaries(self, token, page):
+        with self.connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM trials WHERE token=?", (token,)).fetchone()[0]
+            page = max(0, min(page, max(0, (count - 1) // 8)))
+            rows = db.execute("SELECT * FROM trials WHERE token=? ORDER BY started DESC, user_id LIMIT 8 OFFSET ?",
+                              (token, page * 8)).fetchall()
+        return rows, page, count
 
     def expiry(self, uid):
         with self.connect() as db:
@@ -51,9 +82,11 @@ class TrialStore:
         # One transaction protects the lifetime user-ID limit and link-disable race.
         with self.connect() as db, db:
             db.execute("BEGIN IMMEDIATE")
-            link = db.execute("SELECT enabled FROM links WHERE token=?", (token,)).fetchone()
+            link = db.execute("SELECT enabled, duration_days, deleted FROM links WHERE token=?", (token,)).fetchone()
             if not link:
                 return "invalid", None
+            if link["deleted"]:
+                return "disabled", None
             db.execute("UPDATE links SET opens=opens+1 WHERE token=?", (token,))
             if subscribed:
                 return "subscribed", None
@@ -62,15 +95,15 @@ class TrialStore:
                 return "used", old[0]
             if not link[0]:
                 return "disabled", None
-            expiry = now + 86400
+            expiry = now + link["duration_days"] * 86400
             db.execute("INSERT INTO trials VALUES (?, ?, ?, ?)", (uid, token, now, expiry))
             return "started", expiry
 
     def links(self, page):
         with self.connect() as db:
-            count = db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+            count = db.execute("SELECT COUNT(*) FROM links WHERE deleted=0").fetchone()[0]
             page = max(0, min(page, max(0, (count - 1) // 8)))
-            rows = db.execute("SELECT * FROM links ORDER BY created DESC, token LIMIT 8 OFFSET ?", (page * 8,)).fetchall()
+            rows = db.execute("SELECT * FROM links WHERE deleted=0 ORDER BY created DESC, token LIMIT 8 OFFSET ?", (page * 8,)).fetchall()
         return rows, page, count
 
     def stats(self, token, now):
@@ -149,54 +182,6 @@ def install(core, subscribed, public_active, public_status):
             return
         await original_start(update, context)
 
-    async def edit_panel(query, text, **kwargs):
-        try:
-            await query.edit_message_text(text, **kwargs)
-        except BadRequest as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
-
-    async def show_list(query, page):
-        links, page, count = store.links(page)
-        rows = [[button("➕ إنشاء رابط تجربة ليوم واحد", "trial_admin_create", "success")]]
-        for link in links:
-            status = "🟢" if link["enabled"] else "🔴"
-            rows.append([button(f'{status} {timestamp(link["created"])} · {link["token"][:6]}',
-                                f'trial_admin_view:{link["token"]}', "primary")])
-        nav = []
-        if page:
-            nav.append(button("⬅️ السابق", f"trial_admin_list:{page-1}", "primary"))
-        if (page + 1) * 8 < count:
-            nav.append(button("التالي ➡️", f"trial_admin_list:{page+1}", "primary"))
-        if nav:
-            rows.append(nav)
-        rows.append([button("🔙 لوحة الأدمن", "admin_menu", "primary")])
-        await edit_panel(query,
-            "🎁 روابط التجربة\n\nمدة التجربة 24 ساعة من لحظة التفعيل، مرة واحدة لكل حساب عبر جميع الروابط.\n"
-            "تعطيل الرابط يمنع مستخدمين جدد فقط. الاشتراكات والفتح العام مستقلان عن التجربة.\n\n"
-            f"عدد الروابط: {count} — الصفحة {page+1}", reply_markup=InlineKeyboardMarkup(rows))
-
-    async def show_link(query, context, token):
-        link, total, active = store.stats(token, now())
-        if not link:
-            await show_list(query, 0)
-            return
-        bot_user = await context.bot.get_me()
-        rows = [[button("🔄 تحديث الإحصائيات", f"trial_admin_view:{token}", "primary")]]
-        if link["enabled"]:
-            rows.append([button("🔴 تعطيل الرابط", f"trial_admin_disable:{token}", "danger")])
-        rows.append([button("🔙 روابط التجربة", "trial_admin_list:0", "primary")])
-        await edit_panel(query,
-            "🎁 تفاصيل رابط التجربة\n\n"
-            f"https://t.me/{bot_user.username}?start=trial_{token}\n\n"
-            f"الحالة: {'فعال' if link['enabled'] else 'معطل'}\n"
-            f"تاريخ الإنشاء: {timestamp(link['created'])}\n"
-            f"مرات وصول /start عبر الرابط: {link['opens']}\n"
-            f"الأشخاص الذين فعّلوا التجربة: {total}\n"
-            f"التجارب النشطة: {active}\nالتجارب المنتهية: {total-active}\n\n"
-            "المدة: 24 ساعة لكل شخص من تفعيله. تعطيل الرابط لا يوقف التجارب المفعّلة.",
-            reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
-
     async def on_button(update, context):
         query = update.callback_query
         if not query:
@@ -216,29 +201,12 @@ def install(core, subscribed, public_active, public_status):
                 text = "🎁 تجربتك المجانية\n\n" + expiry_text(expiry, now())
             await query.edit_message_text(text, reply_markup=core.back_button("back"))
             return
-        if not data.startswith("trial_admin_"):
-            return await original_button(update, context)
-        await query.answer()
-        if not core.is_admin(uid):
+        if await management.on_button(update, context):
             return
-        core.admin_pending.pop(uid, None)
-        core.admin_pending_target.pop(uid, None)
-        if data.startswith("trial_admin_list:"):
-            try:
-                page = int(data.split(":", 1)[1])
-            except ValueError:
-                page = 0
-            await show_list(query, page)
-        elif data == "trial_admin_create":
-            # Resolve bot identity before persisting a link that must be displayed.
-            await context.bot.get_me()
-            token = store.create(now())
-            await show_link(query, context, token)
-        elif data.startswith(("trial_admin_view:", "trial_admin_disable:")):
-            token = data.split(":", 1)[1]
-            if data.startswith("trial_admin_disable:"):
-                store.disable(token)
-            await show_link(query, context, token)
+        await original_button(update, context)
+
+    from trial_management import TrialManagement
+    management = TrialManagement(core, store, timestamp)
 
     core.has_active_subscription = access
     core.cmd_start = start

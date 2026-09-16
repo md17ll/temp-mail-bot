@@ -150,6 +150,7 @@ def admin_search_keyboard() -> InlineKeyboardMarkup:
 def admin_monitor_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [_core.make_button("📧 الأكثر بريدات", "mail_admin_top:0", "primary")],
             [
                 _core.make_button("👥 الأعضاء", "admin_members_page:0", "success"),
                 _core.make_button("🔎 بحث عن عضو", "admin_member_search", "primary"),
@@ -534,6 +535,10 @@ def install(core_module) -> None:
     _core.admin_monitor_keyboard = admin_monitor_keyboard
     _core.admin_communication_keyboard = admin_communication_keyboard
     _core.admin_security_keyboard = admin_security_keyboard
+
+    # Additional admin tools preserve the core mailbox/subscription handlers.
+    from member_mail_admin import install as install_mail_admin
+    install_mail_admin(_core)
 
     # Add isolated trial storage and access/UI wrappers after the existing layer.
     from trial_access import install as install_trials
