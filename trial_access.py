@@ -28,6 +28,10 @@ class TrialStore:
                 CREATE TABLE IF NOT EXISTS trial_settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS subscription_notices (
+                    user_id INTEGER NOT NULL, period TEXT NOT NULL,
+                    status TEXT NOT NULL, PRIMARY KEY(user_id, period)
+                );
             """)
             # Additive migration: existing links keep their original one-day duration.
             db.execute("BEGIN IMMEDIATE")
@@ -39,6 +43,10 @@ class TrialStore:
             ):
                 if name not in columns:
                     db.execute(f"ALTER TABLE links ADD COLUMN {name} {definition}")
+            trial_columns = {row[1] for row in db.execute("PRAGMA table_info(trials)")}
+            for name, definition in (("revoked_at", "REAL"), ("notice_claimed", "INTEGER NOT NULL DEFAULT 0")):
+                if name not in trial_columns:
+                    db.execute(f"ALTER TABLE trials ADD COLUMN {name} {definition}")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -92,9 +100,47 @@ class TrialStore:
         return rows, page, count
 
     def expiry(self, uid):
+        row = self.trial(uid)
+        return min(row['expires'], row['revoked_at']) if row and row['revoked_at'] is not None else (row['expires'] if row else None)
+
+    def trial(self, uid):
         with self.connect() as db:
-            row = db.execute("SELECT expires FROM trials WHERE user_id=?", (uid,)).fetchone()
-        return row[0] if row else None
+            return db.execute("SELECT * FROM trials WHERE user_id=?", (uid,)).fetchone()
+
+    def revoke(self, uid, now):
+        with self.connect() as db, db:
+            return db.execute("UPDATE trials SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL AND expires>?",
+                              (now, uid, now)).rowcount == 1
+
+    def claim_trial_notice(self, uid):
+        with self.connect() as db, db:
+            return db.execute("UPDATE trials SET notice_claimed=1 WHERE user_id=? AND notice_claimed=0", (uid,)).rowcount == 1
+
+    def release_trial_notice(self, uid):
+        with self.connect() as db, db:
+            db.execute("UPDATE trials SET notice_claimed=0 WHERE user_id=?", (uid,))
+
+    def counts(self, now, token=None):
+        where, args = (" WHERE token=?", (now, token)) if token is not None else ("", (now,))
+        with self.connect() as db:
+            row = db.execute("SELECT COUNT(*), COALESCE(SUM(revoked_at IS NULL AND expires>?),0), "
+                             "COALESCE(SUM(revoked_at IS NOT NULL),0) FROM trials" + where, args).fetchone()
+        return {"total":row[0], "active":row[1], "stopped":row[2], "expired":row[0]-row[1]-row[2]}
+
+    def all_trials(self, page):
+        with self.connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM trials").fetchone()[0]
+            page = max(0, min(page, max(0,(count-1)//8)))
+            rows = db.execute("SELECT * FROM trials ORDER BY started DESC, user_id LIMIT 8 OFFSET ?", (page*8,)).fetchall()
+        return rows, page, count
+
+    def claim_subscription_notice(self, uid, period, status="claimed"):
+        with self.connect() as db, db:
+            return db.execute("INSERT OR IGNORE INTO subscription_notices VALUES (?, ?, ?)", (uid,period,status)).rowcount == 1
+
+    def subscription_notice_status(self, uid, period, status):
+        with self.connect() as db, db:
+            db.execute("UPDATE subscription_notices SET status=? WHERE user_id=? AND period=?", (status,uid,period))
 
     def redeem(self, token, uid, now, subscribed=False):
         # One transaction protects the lifetime user-ID limit and link-disable race.
@@ -108,13 +154,13 @@ class TrialStore:
             db.execute("UPDATE links SET opens=opens+1 WHERE token=?", (token,))
             if subscribed:
                 return "subscribed", None
-            old = db.execute("SELECT expires FROM trials WHERE user_id=?", (uid,)).fetchone()
+            old = db.execute("SELECT expires, revoked_at FROM trials WHERE user_id=?", (uid,)).fetchone()
             if old:
-                return "used", old[0]
+                return "used", min(old[0], old[1]) if old[1] is not None else old[0]
             if not link[0]:
                 return "disabled", None
             expiry = now + link["duration_days"] * 86400
-            db.execute("INSERT INTO trials VALUES (?, ?, ?, ?)", (uid, token, now, expiry))
+            db.execute("INSERT INTO trials(user_id, token, started, expires) VALUES (?, ?, ?, ?)", (uid, token, now, expiry))
             return "started", expiry
 
     def links(self, page):
@@ -127,7 +173,7 @@ class TrialStore:
     def stats(self, token, now):
         with self.connect() as db:
             row = db.execute("SELECT * FROM links WHERE token=?", (token,)).fetchone()
-            counts = db.execute("SELECT COUNT(*), COALESCE(SUM(expires > ?), 0) FROM trials WHERE token=?", (now, token)).fetchone()
+            counts = db.execute("SELECT COUNT(*), COALESCE(SUM(expires > ? AND revoked_at IS NULL), 0) FROM trials WHERE token=?", (now, token)).fetchone()
         return row, counts[0], counts[1]
 
 
@@ -156,6 +202,13 @@ def trial_message(expiry, now, title="🎁 تجربتك المجانية"):
             + expiry_text(expiry, now))
 
 
+def support_button(username, text="💬 التواصل لتفعيل الاشتراك"):
+    try:
+        return InlineKeyboardButton(text, url=f"https://t.me/{username}", style="success")
+    except TypeError:
+        return InlineKeyboardButton(text, url=f"https://t.me/{username}", api_kwargs={"style":"success"})
+
+
 def install(core, subscribed, public_active, public_status):
     store = TrialStore(Path(core.DATA_DIR) / "trial_access.sqlite3")
     original_access = core.has_active_subscription
@@ -171,8 +224,7 @@ def install(core, subscribed, public_active, public_status):
         rows = []
         username = store.support_username()
         if username:
-            rows.append([InlineKeyboardButton("💬 التواصل مع الأدمن للاشتراك",
-                                               url=f"https://t.me/{username}")])
+            rows.append([support_button(username)])
         if back:
             rows.append([button("🔙 عودة", "back", "primary")])
         return InlineKeyboardMarkup(rows) if rows else None
@@ -204,6 +256,21 @@ def install(core, subscribed, public_active, public_status):
             return
         token = args[0][6:]
         if not re.fullmatch(r"[0-9a-f]{24}", token):
+            return
+        previous = store.trial(uid)
+        if previous and (previous['revoked_at'] is not None or previous['expires'] <= now()):
+            if access(uid):
+                return await original_start(update, context)
+            link, _, _ = store.stats(token, now())
+            if link and store.claim_trial_notice(uid):
+                try:
+                    await update.effective_message.reply_text(
+                        "⌛ انتهت تجربتك المجانية\n\n"
+                        "للاستمرار باستخدام خدمة البريد المؤقت، تواصل معنا لمعرفة تفاصيل الاشتراك وتفعيله 👇",
+                        reply_markup=trial_markup())
+                except BadRequest:
+                    store.release_trial_notice(uid)
+                    raise
             return
         result, expiry = store.redeem(token, uid, now(), subscribed(uid))
         if result == "started":
@@ -257,6 +324,9 @@ def install(core, subscribed, public_active, public_status):
 
     from trial_management import TrialManagement
     management = TrialManagement(core, store, timestamp)
+
+    from subscription_lifecycle import install as install_subscriptions
+    install_subscriptions(core, store)
 
     core.has_active_subscription = access
     core.cmd_start = start

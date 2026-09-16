@@ -24,7 +24,7 @@ class TrialManagement:
     def clear(self, uid):
         self.drafts.pop(uid, None)
         if (str(self.core.admin_pending.get(uid, "")).startswith("trial_wizard_")
-                or self.core.admin_pending.get(uid) == "trial_support_username"):
+                or self.core.admin_pending.get(uid) in {"trial_support_username", "trial_member_search"}):
             self.core.admin_pending.pop(uid, None)
 
     async def edit(self, query, text, rows, **kwargs):
@@ -37,6 +37,76 @@ class TrialManagement:
     def live_link(self, token):
         link, total, active = self.store.stats(token, self.core.now_utc().timestamp())
         return (None if link and link["deleted"] else link), total, active
+
+    def status(self, record, now):
+        if record["revoked_at"] is not None:
+            return "⛔ موقوفة يدويًا"
+        return "🟢 نشطة" if record["expires"] > now else "⌛ منتهية"
+
+    async def show_home(self, query):
+        counts = self.store.counts(self.core.now_utc().timestamp())
+        with self.store.connect() as db:
+            enabled, disabled = db.execute("SELECT COALESCE(SUM(enabled=1),0), COALESCE(SUM(enabled=0),0) FROM links WHERE deleted=0").fetchone()
+        await self.edit(query,
+            "🎁 إدارة التجارب\n\nتابع روابطك والمستفيدين، وأوقف تجربة شخص محدد دون تغيير اشتراكه أو بريداته.\n\n"
+            f"🔗 الروابط الفعالة: {enabled} — المعطلة: {disabled}\n"
+            f"👥 إجمالي المستفيدين: {counts['total']}\n"
+            f"🟢 تجارب نشطة: {counts['active']}\n⌛ منتهية: {counts['expired']}\n⛔ موقوفة: {counts['stopped']}",
+            [[self.button("➕ إنشاء رابط تجربة", "trial_admin_create", "success")],
+             [self.button("🔗 إدارة الروابط", "trial_admin_list:0", "primary")],
+             [self.button("👥 إدارة المستفيدين", "trial_admin_all:0", "primary"),
+              self.button("🔎 البحث عن مستفيد", "trial_admin_search", "primary")],
+             [self.button("💬 إعداد حساب التواصل", "trial_admin_support", "primary")],
+             [self.button("🔄 تحديث الملخص", "trial_admin_home", "primary")],
+             self.back("admin_menu", "🔙 لوحة الأدمن")])
+
+    async def show_all(self, query, page):
+        users, page, count = self.store.all_trials(page)
+        rows = []
+        now = self.core.now_utc().timestamp()
+        for record in users:
+            uid = record['user_id']
+            label = self.core.user_display_name(uid)[:35]
+            rows.append([self.button(f"{label} · {self.status(record, now)}", f"trial_admin_person:{uid}")])
+        nav = []
+        if page:
+            nav.append(self.button("⬅️ السابق", f"trial_admin_all:{page-1}", "primary"))
+        if (page+1)*8 < count:
+            nav.append(self.button("التالي ➡️", f"trial_admin_all:{page+1}", "primary"))
+        if nav:
+            rows.append(nav)
+        rows.append(self.back("trial_admin_home", "🔙 إدارة التجارب"))
+        await self.edit(query, "👥 المستفيدون من التجارب\n\nاضغط على الشخص لعرض تجربته وإدارتها.\n"
+                        f"العدد: {count} — الصفحة {page+1}", rows)
+
+    def person_panel(self, uid):
+        record = self.store.trial(uid)
+        if not record:
+            return "لم أجد تجربة لهذا المستخدم.", [self.back("trial_admin_all:0", "🔙 المستفيدون")]
+        now = self.core.now_utc().timestamp()
+        link, _, _ = self.store.stats(record['token'], now)
+        source = self.name(link) if link else record['token'][:6]
+        if link and link['deleted']:
+            source += " (رابط محذوف)"
+        text = (f"👤 {self.core.user_display_name(uid)}\nID: {uid}\n\n"
+                f"التجربة: {self.status(record, now)}\nالرابط: {source}\n"
+                f"بدأت: {self.timestamp(record['started'])}\nالنهاية الأصلية: {self.timestamp(record['expires'])}\n"
+                f"الاشتراك: {self.core.subscription_status_text(uid)}")
+        rows = []
+        if record['revoked_at'] is not None:
+            text += f"\nأوقفت: {self.timestamp(record['revoked_at'])}"
+        elif record['expires'] > now:
+            from trial_access import expiry_text
+            text += "\n" + expiry_text(record['expires'], now)
+            rows.append([self.button("⛔ إيقاف تجربة هذا المستخدم", f"trial_admin_stop:{uid}", "danger")])
+        if link and not link['deleted']:
+            rows.append(self.back(f"trial_admin_view:{record['token']}", "🔗 الرابط المصدر"))
+        rows.append(self.back("trial_admin_all:0", "🔙 المستفيدون"))
+        return text, rows
+
+    async def show_person(self, query, uid):
+        text, rows = self.person_panel(uid)
+        await self.edit(query, text, rows)
 
     async def show_list(self, query, page):
         links, page, count = self.store.links(page)
@@ -53,7 +123,7 @@ class TrialManagement:
             nav.append(self.button("التالي ➡️", f"trial_admin_list:{page+1}", "primary"))
         if nav:
             rows.append(nav)
-        rows.append(self.back("admin_menu", "🔙 لوحة الأدمن"))
+        rows.append(self.back("trial_admin_home", "🔙 إدارة التجارب"))
         await self.edit(query,
             "🎁 روابط التجربة\n\nاختر مدة واسم كل رابط عند إنشائه. تبدأ المدة من تفعيل المستخدم، "
             "مرة واحدة لكل حساب عبر جميع الروابط.\n"
@@ -65,6 +135,7 @@ class TrialManagement:
         link, total, active = self.live_link(token)
         if not link:
             return await self.show_list(query, 0)
+        counts = self.store.counts(self.core.now_utc().timestamp(), token)
         bot_user = await context.bot.get_me()
         rows = [[self.button("🔄 تحديث الإحصائيات", f"trial_admin_view:{token}", "primary")],
                 [self.button("👥 المستفيدون", f"trial_admin_users:{token}:0", "primary")]]
@@ -81,7 +152,8 @@ class TrialManagement:
             f"تاريخ الإنشاء: {self.timestamp(link['created'])}\n"
             f"مرات وصول /start عبر الرابط: {link['opens']}\n"
             f"الأشخاص الذين فعّلوا التجربة: {total}\n"
-            f"التجارب النشطة زمنيًا: {active}\nالتجارب المنتهية: {total-active}\n\n"
+            f"التجارب النشطة: {active}\nالتجارب المنتهية: {counts['expired']}\n"
+            f"الموقوفة يدويًا: {counts['stopped']}\n\n"
             "الحظر والاشتراكات مستقلان عن مدة التجربة. تعطيل الرابط أو حذفه لا يغيّر التجارب السابقة.",
             rows, disable_web_page_preview=True)
 
@@ -96,12 +168,12 @@ class TrialManagement:
         for record in users:
             uid = record["user_id"]
             name = self.core.user_display_name(uid)[:60]
-            status = "نشطة" if record["expires"] > now else "منتهية"
+            status = self.status(record, now)
             if self.core.is_blocked(uid):
                 status += " — المستخدم محظور"
             lines.append(f"\n👤 {name}\nID: {uid} — {status}\n"
                          f"بدأت: {self.timestamp(record['started'])}\nتنتهي: {self.timestamp(record['expires'])}")
-            rows.append([self.button(f"👤 {name[:40]} · {uid}", f"admin_member:{uid}")])
+            rows.append([self.button(f"👤 {name[:40]} · {uid}", f"trial_admin_person:{uid}")])
         if not users:
             lines.append("\nلم يفعّل أحد التجربة عبر هذا الرابط بعد.")
         nav = []
@@ -145,6 +217,23 @@ class TrialManagement:
             return False
         uid = user.id
         action = self.core.admin_pending.get(uid, "")
+        if action == "trial_member_search":
+            if not self.core.is_admin(uid):
+                self.clear(uid)
+                return True
+            value = (message.text or "").strip()
+            target = (int(value) if value.isdecimal() else next(
+                (member_id for member_id, profile in self.core.known_users.items()
+                 if str(profile.get("username") or "").lower() == value.lstrip("@").lower()
+                 and value.lstrip("@")), None))
+            if target is None or not self.store.trial(target):
+                await message.reply_text("لم أجد مستفيدًا. أرسل ID أو @username صحيحًا.",
+                                         reply_markup=InlineKeyboardMarkup([self.back("trial_admin_home", "🔙 إدارة التجارب")]))
+                return True
+            self.clear(uid)
+            text, rows = self.person_panel(target)
+            await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+            return True
         if action == "trial_support_username":
             if not self.core.is_admin(uid):
                 self.clear(uid)
@@ -236,7 +325,37 @@ class TrialManagement:
         self.clear(uid)
         self.core.admin_pending.pop(uid, None)
         self.core.admin_pending_target.pop(uid, None)
-        if action == "trial_admin_create":
+        if action == "trial_admin_home":
+            await self.show_home(query)
+        elif action == "trial_admin_all":
+            try:
+                page = int(rest)
+            except ValueError:
+                page = 0
+            await self.show_all(query, page)
+        elif action == "trial_admin_search":
+            self.core.admin_pending[uid] = "trial_member_search"
+            await self.edit(query, "🔎 البحث عن مستفيد\n\nأرسل ID أو @username لعرض تجربته وإدارتها.",
+                            [self.back("trial_admin_home", "🔙 إدارة التجارب")])
+        elif action in {"trial_admin_person", "trial_admin_stop", "trial_admin_stop_confirm"}:
+            try:
+                target = int(rest)
+            except ValueError:
+                return True
+            record = self.store.trial(target)
+            now = self.core.now_utc().timestamp()
+            if action == "trial_admin_stop" and record and record['revoked_at'] is None and record['expires'] > now:
+                await self.edit(query,
+                    f"⛔ إيقاف تجربة {self.core.user_display_name(target)}\nID: {target}\n\n"
+                    "هل تريد إيقاف تجربته الآن؟ لن تتغير بريداته أو اشتراكه أو حظره.\n"
+                    "إن كان لديه اشتراك فعال أو وصول عام، يستمر بذلك الوصول. لن يستطيع بدء تجربة جديدة.",
+                    [[self.button("🔴 نعم، أوقف التجربة", f"trial_admin_stop_confirm:{target}", "danger")],
+                     self.back(f"trial_admin_person:{target}", "🔙 إلغاء")])
+            else:
+                if action == "trial_admin_stop_confirm":
+                    self.store.revoke(target, now)
+                await self.show_person(query, target)
+        elif action == "trial_admin_create":
             await self.choose_duration(query, uid)
         elif action == "trial_admin_support":
             self.core.admin_pending[uid] = "trial_support_username"
@@ -244,7 +363,7 @@ class TrialManagement:
             await self.edit(query,
                 "✏️ يوزر الدعم\n\n"
                 f"الحالي: {'@' + username if username else 'غير محدد'}\n"
-                "أرسل يوزر حساب الدعم مثل @username. سيظهر بزر شفاف لطلب الاشتراك داخل شاشة التجربة.\n"
+                "أرسل يوزر حساب الدعم مثل @username. سيظهر بزر أخضر للاشتراك والتجديد.\n"
                 "إذا لم تحدد يوزرًا، يبقى زر التواصل مخفيًا.", [self.back()])
         elif action == "trial_admin_list":
             try:

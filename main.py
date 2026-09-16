@@ -448,13 +448,23 @@ def delete_email(user_id: int, index: int) -> Optional[str]:
     return deleted
 
 
-def start_text(last_email: Optional[str]) -> str:
+def start_text(last_email: Optional[str], uid: Optional[int] = None) -> str:
     base = (
         "مرحباً بك في بوت البريد المؤقت ✉️\n"
         "استخدم هذا البوت لإنشاء بريد إلكتروني مؤقت للتسجيل في المواقع دون الكشف عن بريدك الحقيقي."
     )
     if last_email:
-        return f"{base}\n\nبريدك الحالي:\n`{last_email}`"
+        base += f"\n\nبريدك الحالي:\n`{last_email}`"
+    if uid is not None and not is_blocked(uid):
+        record = subscriptions.get(uid)
+        if record:
+            expiry = str_to_dt(record.get("expires_at"))
+            if record.get("expires_at") is None:
+                base += "\n\n♾️ اشتراكك غير محدد المدة"
+            elif expiry and expiry > now_utc():
+                seconds = (expiry - now_utc()).total_seconds()
+                remaining = "أقل من يوم" if seconds < 86400 else f"{math.ceil(seconds / 86400)} يومًا"
+                base += f"\n\n👑 اشتراكك فعّال\n⏳ المتبقي من اشتراكك: {remaining}"
     return base
 
 
@@ -1024,7 +1034,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     last = user_last_email.get(uid)
     await update.effective_message.reply_text(
-        start_text(last),
+        start_text(last, uid),
         reply_markup=main_keyboard_for(uid),
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
@@ -1484,7 +1494,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         waiting_for_name.discard(uid)
         last = user_last_email.get(uid)
         await query.edit_message_text(
-            start_text(last),
+            start_text(last, uid),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_keyboard_for(uid),
             disable_web_page_preview=True,

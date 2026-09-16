@@ -106,7 +106,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
                 _core.make_button("📣 التواصل", "admin_section_communication", "success"),
             ],
             [_core.make_button("🛡️ الحماية", "admin_section_security", "danger")],
-            [_core.make_button("🎁 روابط التجربة", "trial_admin_list:0", "primary")],
+            [_core.make_button("🎁 إدارة التجارب", "trial_admin_home", "primary")],
             [_core.make_button("🔙 عودة", "back", "primary")],
         ]
     )
