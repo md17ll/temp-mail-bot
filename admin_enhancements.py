@@ -77,7 +77,7 @@ def enhanced_has_active_subscription(user_id: int) -> bool:
 def _public_access_status_text() -> str:
     expiry = _public_access_expiry()
     if not expiry or expiry <= _core.now_utc():
-        return "🔒 مغلق للعامة — الاستخدام للمشتركين فقط"
+        return "🔒 مغلق للعامة — الاستخدام لأصحاب الاشتراكات أو التجارب الفعالة"
 
     remaining = expiry - _core.now_utc()
     seconds = max(0, int(remaining.total_seconds()))
@@ -92,7 +92,7 @@ def _public_access_status_text() -> str:
     return (
         "🔓 مفتوح للجميع\n"
         f"⏳ المتبقي تقريباً: {remaining_text}\n"
-        f"📅 ينتهي: {expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+        f"📅 ينتهي: {expiry.strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
 
 
@@ -106,6 +106,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
                 _core.make_button("📣 التواصل", "admin_section_communication", "success"),
             ],
             [_core.make_button("🛡️ الحماية", "admin_section_security", "danger")],
+            [_core.make_button("🎁 روابط التجربة", "trial_admin_list:0", "primary")],
             [_core.make_button("🔙 عودة", "back", "primary")],
         ]
     )
@@ -437,7 +438,7 @@ async def enhanced_on_button(update, context) -> None:
             "🌍 فتح البوت للجميع\n\n"
             "هذا الخيار يضيف وصولاً مؤقتاً لغير المشتركين فقط.\n"
             "اشتراكات الأشخاص تستمر بوقتها الطبيعي ولا تتوقف ولا تُمدد ولا تُحذف.\n"
-            "وعند انتهاء المدة، يبقى البوت متاحاً للمشتركين الفعالين فقط.\n\n"
+            "وعند انتهاء المدة، يستمر وصول أصحاب الاشتراكات أو التجارب الفعالة.\n\n"
             f"الحالة الحالية:\n{_public_access_status_text()}\n\n"
             "اختر مدة الفتح:",
             reply_markup=public_access_keyboard(),
@@ -469,7 +470,7 @@ async def enhanced_on_button(update, context) -> None:
         await query.edit_message_text(
             "🔒 تم إغلاق الوصول العام.\n\n"
             "أصحاب الاشتراكات الفعالة يستمرون باستخدام البوت بشكل طبيعي، "
-            "أما غير المشتركين فلن يرد عليهم البوت.",
+            "وأصحاب التجارب الفعالة يكملون مدتهم؛ غير ذلك يعود البوت صامتاً.",
             reply_markup=public_access_keyboard(),
         )
         return
@@ -533,5 +534,10 @@ def install(core_module) -> None:
     _core.admin_monitor_keyboard = admin_monitor_keyboard
     _core.admin_communication_keyboard = admin_communication_keyboard
     _core.admin_security_keyboard = admin_security_keyboard
+
+    # Add isolated trial storage and access/UI wrappers after the existing layer.
+    from trial_access import install as install_trials
+    install_trials(_core, _original_has_active_subscription,
+                   public_access_active, _public_access_status_text)
 
     print("Admin enhancements installed")
