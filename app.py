@@ -1,10 +1,11 @@
 from typing import Dict, List
 
 from fastapi import HTTPException, Request
-from telegram import BotCommand
+from telegram import BotCommand, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 import admin_enhancements
 import main as core
+import mail_preferences
 from smart_mail import (
     clean_text,
     extract_otp,
@@ -12,10 +13,12 @@ from smart_mail import (
     otp_copy_keyboard,
     split_message,
 )
+from verification_extract import extract_smart_findings
 
 
 # Install admin UI/public-access enhancements before the core startup registers handlers.
 admin_enhancements.install(core)
+mail_preferences.install(core)
 
 # Reuse the existing FastAPI app and all Telegram/admin/subscription logic.
 app = core.app
@@ -53,6 +56,41 @@ def build_email_text(to_email: str, sender: str, subject: str, body: str) -> str
         f"العنوان: {subject or '(بدون عنوان)'}\n\n"
         f"{body or '(بدون نص)'}"
     )
+
+
+def build_filtered_email_text(
+    to_email: str, sender: str, subject: str, codes: List[str], links: List[str]
+) -> str:
+    lines = [
+        "🔎 تم اكتشاف معلومات مهمة في رسالة جديدة",
+        "",
+        f"إلى: {to_email}",
+        f"من: {sender or '(غير معروف)'}",
+        f"العنوان: {subject or '(بدون عنوان)'}",
+    ]
+    if codes:
+        lines.extend(["", "🔐 رموز التحقق:"] + [f"• {code}" for code in codes])
+    if links:
+        lines.extend(["", "🔗 روابط التفعيل أو الاستعادة:"] + [f"• {link}" for link in links])
+    lines.extend(["", "هذه خلاصة ذكية للرسالة حسب إعدادات إشعاراتك."])
+    return "\n".join(lines)
+
+
+def codes_copy_keyboard(codes: List[str]):
+    if not codes:
+        return None
+    rows = []
+    for code in codes[:5]:
+        try:
+            button = InlineKeyboardButton(
+                text=f"📋 نسخ {code}", copy_text=CopyTextButton(text=code)
+            )
+        except TypeError:
+            button = InlineKeyboardButton(
+                text=f"📋 نسخ {code}", api_kwargs={"copy_text": {"text": code}}
+            )
+        rows.append([button])
+    return InlineKeyboardMarkup(rows)
 
 
 @app.post("/mailgun")
@@ -110,10 +148,10 @@ async def smart_mailgun_inbound(request: Request) -> Dict[str, bool]:
     if not recipients:
         return {"ok": True, "delivered": False}
 
-    # Detect OTP/PIN once from the actual email content. A button is added only
-    # when contextual evidence strongly indicates a real verification code.
+    # Legacy detection remains exactly as before for the default/full-message mode.
     otp = extract_otp(subject, body)
     copy_keyboard = otp_copy_keyboard(otp)
+    smart_findings = None
 
     sent_any = False
     for to_email in recipients:
@@ -126,7 +164,26 @@ async def smart_mailgun_inbound(request: Request) -> Dict[str, bool]:
             print("Inactive owner, skip deliver to:", owner_id, "email:", to_email)
             continue
 
-        full_text = build_email_text(to_email, sender, subject, body)
+        receiving, mode = mail_preferences.delivery_policy(owner_id)
+        if not receiving:
+            print("Mail receiving paused for owner:", owner_id)
+            continue
+
+        message_keyboard = copy_keyboard
+        if mode == "all":
+            full_text = build_email_text(to_email, sender, subject, body)
+        else:
+            if smart_findings is None:
+                smart_findings = extract_smart_findings(subject, body, body_html)
+            filtered_codes = smart_findings.codes
+            filtered_links = smart_findings.links if mode == "codes_links" else []
+            if not filtered_codes and not filtered_links:
+                print("No requested code/action link for owner:", owner_id)
+                continue
+            full_text = build_filtered_email_text(
+                to_email, sender, subject, filtered_codes, filtered_links
+            )
+            message_keyboard = codes_copy_keyboard(filtered_codes)
         chunks: List[str] = split_message(full_text)
 
         try:
@@ -135,7 +192,7 @@ async def smart_mailgun_inbound(request: Request) -> Dict[str, bool]:
                 await core.tg_app.bot.send_message(
                     chat_id=owner_id,
                     text=chunk,
-                    reply_markup=copy_keyboard if is_last else None,
+                    reply_markup=message_keyboard if is_last else None,
                     disable_web_page_preview=True,
                 )
             sent_any = True

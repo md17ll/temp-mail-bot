@@ -449,22 +449,24 @@ def delete_email(user_id: int, index: int) -> Optional[str]:
 
 
 def start_text(last_email: Optional[str], uid: Optional[int] = None) -> str:
-    base = (
+    welcome = (
         "مرحباً بك في بوت البريد المؤقت ✉️\n"
         "استخدم هذا البوت لإنشاء بريد إلكتروني مؤقت للتسجيل في المواقع دون الكشف عن بريدك الحقيقي."
     )
-    if last_email:
-        base += f"\n\nبريدك الحالي:\n`{last_email}`"
+    subscription_header = ""
     if uid is not None and not is_blocked(uid):
         record = subscriptions.get(uid)
         if record:
             expiry = str_to_dt(record.get("expires_at"))
             if record.get("expires_at") is None:
-                base += "\n\n♾️ اشتراكك غير محدد المدة"
+                subscription_header = "♾️ اشتراكك غير محدد المدة"
             elif expiry and expiry > now_utc():
                 seconds = (expiry - now_utc()).total_seconds()
                 remaining = "أقل من يوم" if seconds < 86400 else f"{math.ceil(seconds / 86400)} يومًا"
-                base += f"\n\n👑 اشتراكك فعّال\n⏳ المتبقي من اشتراكك: {remaining}"
+                subscription_header = f"👑 اشتراكك فعّال\n⏳ المتبقي من اشتراكك: {remaining}"
+    base = f"{subscription_header}\n\n{welcome}" if subscription_header else welcome
+    if last_email:
+        base += f"\n\nبريدك الحالي:\n`{last_email}`"
     return base
 
 

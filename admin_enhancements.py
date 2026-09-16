@@ -107,6 +107,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             ],
             [_core.make_button("🛡️ الحماية", "admin_section_security", "danger")],
             [_core.make_button("🎁 إدارة التجارب", "trial_admin_home", "primary")],
+            [_core.make_button("⚙️ إعدادات إشعارات المستخدمين", "mail_pref_admin", "primary")],
             [_core.make_button("🔙 عودة", "back", "primary")],
         ]
     )
