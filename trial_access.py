@@ -144,6 +144,18 @@ def expiry_text(expiry, now):
     return f"⏳ الوقت المتبقي: {day_text}{hours} ساعة، {minutes} دقيقة، {seconds} ثانية"
 
 
+def trial_message(expiry, now, title="🎁 تجربتك المجانية"):
+    if expiry <= now:
+        return ("⌛ انتهت تجربتك المجانية\n\n"
+                "نتمنى أن تكون استفدت من الخدمة ✉️\n"
+                "لمتابعة استخدام البوت، تواصل مع الأدمن لمعرفة تفاصيل الاشتراك وتفعيله.")
+    return (f"{title}\n\n"
+            "استمتع بخدمة البريد المؤقت خلال فترة التجربة ✉️\n"
+            "للاستمرار باستخدام البوت بعد انتهاء تجربتك، تواصل مع الأدمن "
+            "لمعرفة تفاصيل الاشتراك وتفعيله 👇\n\n"
+            + expiry_text(expiry, now))
+
+
 def install(core, subscribed, public_active, public_status):
     store = TrialStore(Path(core.DATA_DIR) / "trial_access.sqlite3")
     original_access = core.has_active_subscription
@@ -159,7 +171,7 @@ def install(core, subscribed, public_active, public_status):
         rows = []
         username = store.support_username()
         if username:
-            rows.append([InlineKeyboardButton("💬 التواصل مع الأدمن لطلب اشتراك",
+            rows.append([InlineKeyboardButton("💬 التواصل مع الأدمن للاشتراك",
                                                url=f"https://t.me/{username}")])
         if back:
             rows.append([button("🔙 عودة", "back", "primary")])
@@ -196,12 +208,12 @@ def install(core, subscribed, public_active, public_status):
         result, expiry = store.redeem(token, uid, now(), subscribed(uid))
         if result == "started":
             await update.effective_message.reply_text(
-                "✅ بدأت تجربتك المجانية\n\n" + expiry_text(expiry, now()),
+                trial_message(expiry, now(), "✅ بدأت تجربتك المجانية"),
                 reply_markup=trial_markup())
         elif result == "used":
             if expiry > now():
                 await update.effective_message.reply_text(
-                    "🎁 تجربتك مفعّلة مسبقاً؛ إعادة فتح الرابط لا تمددها.\n\n" + expiry_text(expiry, now()),
+                    trial_message(expiry, now(), "🎁 تجربتك مفعّلة مسبقاً؛ إعادة فتح الرابط لا تمددها."),
                     reply_markup=trial_markup())
             elif not access(uid):
                 return  # Preserve silence after all access has expired.
@@ -231,8 +243,7 @@ def install(core, subscribed, public_active, public_status):
                 expiry = store.expiry(uid)
                 if expiry is None:
                     return
-                text = ("🎁 تجربتك المجانية\n\n" + expiry_text(expiry, now())
-                        if expiry > now() else "⌛ انتهت تجربتك المجانية")
+                text = trial_message(expiry, now())
                 markup = trial_markup(back=access(uid))
             try:
                 await query.edit_message_text(text, reply_markup=markup)
