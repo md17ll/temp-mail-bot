@@ -23,7 +23,8 @@ class TrialManagement:
 
     def clear(self, uid):
         self.drafts.pop(uid, None)
-        if str(self.core.admin_pending.get(uid, "")).startswith("trial_wizard_"):
+        if (str(self.core.admin_pending.get(uid, "")).startswith("trial_wizard_")
+                or self.core.admin_pending.get(uid) == "trial_support_username"):
             self.core.admin_pending.pop(uid, None)
 
     async def edit(self, query, text, rows, **kwargs):
@@ -40,6 +41,7 @@ class TrialManagement:
     async def show_list(self, query, page):
         links, page, count = self.store.links(page)
         rows = [[self.button("➕ إنشاء رابط تجربة", "trial_admin_create", "success")]]
+        rows.append([self.button("✏️ تعديل يوزر الدعم", "trial_admin_support")])
         for link in links:
             status = "🟢" if link["enabled"] else "🔴"
             label = f"{status} {self.name(link)[:35]} · {link['duration_days']} يوم"
@@ -56,6 +58,7 @@ class TrialManagement:
             "🎁 روابط التجربة\n\nاختر مدة واسم كل رابط عند إنشائه. تبدأ المدة من تفعيل المستخدم، "
             "مرة واحدة لكل حساب عبر جميع الروابط.\n"
             "تعطيل الرابط أو حذفه يمنع تفعيلات جديدة فقط؛ التجارب المفعّلة تكمل مدتها.\n\n"
+            f"يوزر الدعم: {'@' + self.store.support_username() if self.store.support_username() else 'غير محدد'}\n"
             f"عدد الروابط: {count} — الصفحة {page+1}", rows)
 
     async def show_link(self, query, context, token):
@@ -142,6 +145,21 @@ class TrialManagement:
             return False
         uid = user.id
         action = self.core.admin_pending.get(uid, "")
+        if action == "trial_support_username":
+            if not self.core.is_admin(uid):
+                self.clear(uid)
+                return True
+            try:
+                username = self.store.set_support_username(message.text or "")
+            except ValueError:
+                await message.reply_text("❌ أرسل يوزرًا صحيحًا مثل @username، بدون رابط أو مسافات.",
+                                         reply_markup=InlineKeyboardMarkup([self.back()]))
+                return True
+            self.clear(uid)
+            await message.reply_text(f"✅ تم حفظ يوزر الدعم: @{username}\n"
+                                     "يظهر زر التواصل لأصحاب التجربة عند فتح الشاشة من جديد. الأزرار المرسلة سابقًا لا تتغير تلقائيًا.",
+                                     reply_markup=InlineKeyboardMarkup([self.back()]))
+            return True
         if not str(action).startswith("trial_wizard_"):
             return await self.original_pending(update, context)
         if not self.core.is_admin(uid):
@@ -220,6 +238,14 @@ class TrialManagement:
         self.core.admin_pending_target.pop(uid, None)
         if action == "trial_admin_create":
             await self.choose_duration(query, uid)
+        elif action == "trial_admin_support":
+            self.core.admin_pending[uid] = "trial_support_username"
+            username = self.store.support_username()
+            await self.edit(query,
+                "✏️ يوزر الدعم\n\n"
+                f"الحالي: {'@' + username if username else 'غير محدد'}\n"
+                "أرسل يوزر حساب الدعم مثل @username. سيظهر بزر شفاف لطلب الاشتراك داخل شاشة التجربة.\n"
+                "إذا لم تحدد يوزرًا، يبقى زر التواصل مخفيًا.", [self.back()])
         elif action == "trial_admin_list":
             try:
                 page = int(rest)

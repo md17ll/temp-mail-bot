@@ -6,7 +6,8 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from telegram import InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 
 
 class TrialStore:
@@ -24,6 +25,9 @@ class TrialStore:
                     started REAL NOT NULL, expires REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS trials_token ON trials(token);
+                CREATE TABLE IF NOT EXISTS trial_settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                );
             """)
             # Additive migration: existing links keep their original one-day duration.
             db.execute("BEGIN IMMEDIATE")
@@ -51,6 +55,20 @@ class TrialStore:
             db.execute("INSERT INTO links(token, created, duration_days, name) VALUES (?, ?, ?, ?)",
                        (token, now, duration_days, name))
         return token
+
+    def support_username(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM trial_settings WHERE key='support_username'").fetchone()
+        return row[0] if row else ""
+
+    def set_support_username(self, value):
+        username = value.strip().removeprefix("@")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", username):
+            raise ValueError("Invalid Telegram username")
+        with self.connect() as db, db:
+            db.execute("INSERT INTO trial_settings(key, value) VALUES ('support_username', ?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (username,))
+        return username
 
     def disable(self, token):
         with self.connect() as db, db:
@@ -122,8 +140,8 @@ def expiry_text(expiry, now):
     days, seconds = divmod(seconds, 86400)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
-    return (f"📅 تنتهي: {timestamp(expiry)}\n"
-            f"⏳ المتبقي: {days} يوم، {hours} ساعة، {minutes} دقيقة، {seconds} ثانية")
+    day_text = f"{days} يوم، " if days else ""
+    return f"⏳ الوقت المتبقي: {day_text}{hours} ساعة، {minutes} دقيقة، {seconds} ثانية"
 
 
 def install(core, subscribed, public_active, public_status):
@@ -136,6 +154,16 @@ def install(core, subscribed, public_active, public_status):
 
     def now():
         return core.now_utc().timestamp()
+
+    def trial_markup(back=False):
+        rows = []
+        username = store.support_username()
+        if username:
+            rows.append([InlineKeyboardButton("💬 التواصل مع الأدمن لطلب اشتراك",
+                                               url=f"https://t.me/{username}")])
+        if back:
+            rows.append([button("🔙 عودة", "back", "primary")])
+        return InlineKeyboardMarkup(rows) if rows else None
 
     def access(uid):
         if original_access(uid):
@@ -152,7 +180,7 @@ def install(core, subscribed, public_active, public_status):
                 rows.append([button("⏳ وصول مجاني مؤقت", "public_access_info", "danger")])
             expiry = store.expiry(uid)
             if expiry and expiry > now():
-                rows.append([button("🎁 وقت انتهاء تجربتي", "trial_access_info", "primary")])
+                rows.append([button("🎁 وقت تجربتك", "trial_access_info", "danger")])
         return InlineKeyboardMarkup(rows)
 
     async def start(update, context):
@@ -168,11 +196,13 @@ def install(core, subscribed, public_active, public_status):
         result, expiry = store.redeem(token, uid, now(), subscribed(uid))
         if result == "started":
             await update.effective_message.reply_text(
-                "✅ بدأت تجربتك المجانية\n\n" + expiry_text(expiry, now()))
+                "✅ بدأت تجربتك المجانية\n\n" + expiry_text(expiry, now()),
+                reply_markup=trial_markup())
         elif result == "used":
             if expiry > now():
                 await update.effective_message.reply_text(
-                    "🎁 تجربتك مفعّلة مسبقاً؛ إعادة فتح الرابط لا تمددها.\n\n" + expiry_text(expiry, now()))
+                    "🎁 تجربتك مفعّلة مسبقاً؛ إعادة فتح الرابط لا تمددها.\n\n" + expiry_text(expiry, now()),
+                    reply_markup=trial_markup())
             elif not access(uid):
                 return  # Preserve silence after all access has expired.
         elif result == "subscribed":
@@ -190,16 +220,25 @@ def install(core, subscribed, public_active, public_status):
         uid = query.from_user.id
         if data in {"public_access_info", "trial_access_info"}:
             await query.answer()
-            if not access(uid) or core.is_blocked(uid) or subscribed(uid):
+            if core.is_blocked(uid) or subscribed(uid):
                 return
             if data == "public_access_info":
+                if not access(uid):
+                    return
                 text = "⏳ وصول مجاني مؤقت\n\n" + public_status()
+                markup = core.back_button("back")
             else:
                 expiry = store.expiry(uid)
-                if not expiry or expiry <= now():
+                if expiry is None:
                     return
-                text = "🎁 تجربتك المجانية\n\n" + expiry_text(expiry, now())
-            await query.edit_message_text(text, reply_markup=core.back_button("back"))
+                text = ("🎁 تجربتك المجانية\n\n" + expiry_text(expiry, now())
+                        if expiry > now() else "⌛ انتهت تجربتك المجانية")
+                markup = trial_markup(back=access(uid))
+            try:
+                await query.edit_message_text(text, reply_markup=markup)
+            except BadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    raise
             return
         if await management.on_button(update, context):
             return
