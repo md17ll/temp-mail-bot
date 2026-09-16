@@ -3,6 +3,7 @@ from typing import Dict, List
 from fastapi import HTTPException, Request
 from telegram import BotCommand
 
+import admin_enhancements
 import main as core
 from smart_mail import (
     clean_text,
@@ -12,6 +13,9 @@ from smart_mail import (
     split_message,
 )
 
+
+# Install admin UI/public-access enhancements before the core startup registers handlers.
+admin_enhancements.install(core)
 
 # Reuse the existing FastAPI app and all Telegram/admin/subscription logic.
 app = core.app
